@@ -1,0 +1,85 @@
+[package]
+name = "docvision-llm-ws"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Lean, high-throughput document-to-Markdown HTTP service"
+license = "MIT"
+publish = false
+
+[lib]
+name = "docvision_llm_ws"
+path = "src/lib.rs"
+
+[[bin]]
+name = "docvision-llm-ws"
+path = "src/main.rs"
+
+[features]
+default = ["s3", "webhooks", "pdf-native", "translate", "lang-detect", "odf-epub", "postgres"]
+s3 = ["dep:object_store"]
+webhooks = ["dep:hmac", "dep:sha2"]
+pdf-native = ["dep:lopdf"]
+translate = []
+lang-detect = ["dep:whatlang"]
+odf-epub = []
+pdf-render = ["dep:pdfium-render", "dep:image"]
+postgres = ["sqlx/postgres"]
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
+tower-http = { version = "0.6", default-features = false, features = ["limit", "compression-gzip", "compression-zstd"] }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream", "multipart"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "any", "sqlite"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytes = { version = "1", default-features = false, features = ["std"] }
+dashmap = { version = "6", default-features = false }
+blake3 = { version = "1", default-features = false, features = ["std"] }
+quick-xml = { version = "0.41", default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tl = { version = "0.7", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+imagesize = { version = "0.13", default-features = false }
+unicode-segmentation = { version = "1", default-features = false }
+url = { version = "2", default-features = false }
+percent-encoding = { version = "2", default-features = false, features = ["std"] }
+subtle = { version = "2", default-features = false }
+uuid = { version = "1", default-features = false, features = ["v7", "std"] }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hmac = { version = "0.12", default-features = false, optional = true }
+sha2 = { version = "0.10", default-features = false, optional = true }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
+fastrand = { version = "2", default-features = false, features = ["std"] }
+time = { version = "0.3", default-features = false, features = ["std", "parsing", "formatting"] }
+dotenvy = { version = "0.15", default-features = false }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "json", "env-filter", "ansi"] }
+mimalloc = { version = "0.1", default-features = false }
+object_store = { version = "0.11", default-features = false, features = ["aws"], optional = true }
+lopdf = { version = "0.45", default-features = false, optional = true }
+whatlang = { version = "0.16", default-features = false, optional = true }
+pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_latest", "thread_safe", "image"], optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
+
+[profile.release-small]
+inherits = "release"
+opt-level = "s"

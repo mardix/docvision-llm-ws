@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DOCVISION-LLM dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #e8ecf1; --panel: #ffffff; --panel-2: #f8fafc; --text: #0f172a; --muted: #64748b; --faint: #94a3b8;
+    --line: #dce2ea; --line-strong: #cbd5e1; --soft: #f1f5f9;
+    --ink: #0f172a; --ink-2: #1e293b; --ink-line: #334155; --ink-text: #e2e8f0; --ink-muted: #94a3b8;
+    --accent: #4f46e5; --accent-hover: #4338ca; --accent-soft: #eef2ff; --accent-ink: #3730a3;
+    --ok: #15803d; --ok-soft: #ecfdf3; --warn: #b45309; --warn-soft: #fff7ed; --bad: #b91c1c; --bad-soft: #fef2f2;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 12px;
+    --shadow: 0 1px 2px rgba(15,23,42,.05), 0 2px 6px rgba(15,23,42,.04);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  .hidden { display: none !important; }
+  .muted { color: var(--muted); }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .spacer { flex: 1; }
+
+  /* top bar */
+  .top { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 16px; height: 58px; padding: 0 24px; background: var(--ink); color: var(--ink-text); border-bottom: 1px solid var(--ink-line); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .06em; font-size: 13.5px; color: #fff; text-decoration: none; }
+  .brand i { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, #818cf8, #4f46e5); box-shadow: 0 0 0 1px rgba(255,255,255,.12) inset; display: inline-block; }
+  .top nav { display: flex; gap: 2px; }
+  .top nav a { color: var(--ink-muted); text-decoration: none; padding: 6px 12px; border-radius: 8px; }
+  .top nav a:hover { color: #fff; background: var(--ink-2); }
+  .top nav a.on { color: #fff; background: var(--ink-2); }
+  .live { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px; background: var(--ink-2); color: var(--ink-muted); font-size: 13px; cursor: pointer; border: 1px solid var(--ink-line); }
+  .live b { color: #fff; font-variant-numeric: tabular-nums; }
+  .live .dot { width: 8px; height: 8px; border-radius: 50%; background: #475569; }
+  .live.active { color: #c7d2fe; border-color: #4338ca; background: rgba(79,70,229,.18); }
+  .live.active .dot { background: #818cf8; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  #updated { color: var(--ink-muted); font-size: 12.5px; }
+  .btn { border: 1px solid var(--line-strong); background: var(--panel); padding: 7px 14px; border-radius: 8px; cursor: pointer; box-shadow: var(--shadow); }
+  .btn:hover { border-color: var(--faint); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-hover); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.sm { padding: 4px 10px; font-size: 13px; box-shadow: none; }
+  .link { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 4px 6px; }
+  .link:hover { color: var(--text); }
+  .top .link { color: var(--ink-muted); }
+  .top .link:hover { color: #fff; }
+
+  main { max-width: 1320px; margin: 0 auto; padding: 24px 24px 80px; }
+  .section { margin-top: 28px; }
+  .section-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; min-height: 34px; }
+  .section-head h2 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -.005em; }
+  .section-head .sub { color: var(--muted); font-size: 13px; }
+  .section-head .tools { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .count { display: inline-block; min-width: 22px; padding: 0 7px; border-radius: 999px; background: var(--line); color: var(--ink-2); font-size: 12px; font-weight: 600; text-align: center; line-height: 20px; }
+  .count.bad { background: var(--bad-soft); color: var(--bad); }
+
+  .seg { display: inline-flex; padding: 3px; background: var(--soft); border: 1px solid var(--line); border-radius: 9px; gap: 2px; }
+  .seg button { border: 0; background: transparent; padding: 5px 11px; border-radius: 7px; cursor: pointer; color: var(--muted); font-size: 13px; }
+  .seg button.on { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+
+  /* time range: the main control of the page */
+  .range { display: inline-flex; padding: 4px; gap: 4px; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 11px; box-shadow: var(--shadow); }
+  .range button { border: 0; background: transparent; padding: 8px 16px; border-radius: 8px; cursor: pointer; color: var(--ink-2); font-size: 14px; font-weight: 550; }
+  .range button:hover { background: var(--soft); }
+  .range button.on { background: var(--ink); color: #fff; }
+
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .kpi { padding: 15px 16px; }
+  .kpi .label { color: var(--muted); font-size: 12.5px; font-weight: 500; }
+  .kpi .value { font-size: 27px; font-weight: 650; letter-spacing: -.025em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .kpi .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .meter { height: 4px; background: var(--soft); border-radius: 2px; margin-top: 9px; overflow: hidden; }
+  .meter span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+
+  .breakdowns { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .bars { padding: 14px 16px; }
+  .bars h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+  .bars .row { display: grid; grid-template-columns: minmax(0, 1fr) 48px; gap: 4px 10px; align-items: center; margin: 8px 0; }
+  .bars .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .bars .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+  .bars .bar { grid-column: 1 / -1; height: 5px; background: var(--soft); border-radius: 3px; overflow: hidden; }
+  .bars .bar span { display: block; height: 100%; background: linear-gradient(90deg, #6366f1, #4f46e5); border-radius: 3px; }
+  .bars .row.click { cursor: pointer; }
+  .bars .row.click:hover .name { color: var(--accent); }
+
+  /* collapsible panels */
+  .panel { overflow: hidden; }
+  .panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 12px 16px; }
+  .toggle { display: inline-flex; align-items: center; gap: 10px; border: 0; background: none; cursor: pointer; padding: 2px 0; font-size: 15px; font-weight: 650; color: var(--text); }
+  .toggle .chev { width: 18px; height: 18px; display: inline-grid; place-items: center; border-radius: 5px; background: var(--soft); color: var(--muted); font-size: 11px; transition: transform .15s; }
+  .panel.collapsed .toggle .chev { transform: rotate(-90deg); }
+  .panel.collapsed .panel-body { display: none; }
+  .panel-head .tools { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .panel.collapsed .panel-head .tools { display: none; }
+  .panel-body { border-top: 1px solid var(--line); }
+  .pager { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 13px; }
+
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
+  th { font-size: 11.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; background: var(--panel-2); }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr.click { cursor: pointer; }
+  tbody tr.click:hover td { background: #f6f8fb; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.src { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  td.wrap { white-space: normal; min-width: 240px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 550; background: var(--soft); color: var(--muted); }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.bad { background: var(--bad-soft); color: var(--bad); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.run { background: var(--accent-soft); color: var(--accent-ink); }
+  .pill.run::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 6px; background: var(--soft); border: 1px solid var(--line); font-size: 12px; color: var(--ink-2); max-width: 200px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+  .fmt { display: inline-block; padding: 1px 7px; border-radius: 6px; background: var(--ink-2); color: #e2e8f0; font-family: var(--mono); font-size: 11.5px; text-transform: lowercase; }
+  .empty { padding: 28px; text-align: center; color: var(--muted); }
+  .filters select, .filters input { border: 1px solid var(--line-strong); background: var(--panel); border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+  .filters input:focus, .filters select:focus { outline: 3px solid var(--accent-soft); border-color: #a5b4fc; }
+
+  /* new request panel */
+  #newPanel { padding: 20px; margin-bottom: 8px; }
+  #newPanel .head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 18px; }
+  #newPanel .head h2 { font-size: 16px; margin: 0; }
+  .form { display: grid; gap: 14px 16px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .form .full { grid-column: 1 / -1; }
+  .field label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 5px; font-weight: 500; }
+  .field input[type=text], .field input[type=number], .field input[type=password], .field select, .field textarea { width: 100%; border: 1px solid var(--line-strong); background: var(--panel); border-radius: 8px; padding: 8px 10px; }
+  .field textarea { min-height: 140px; font-family: var(--mono); font-size: 12.5px; resize: vertical; }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: 3px solid var(--accent-soft); border-color: #a5b4fc; }
+  .checks { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+  .checks label { display: inline-flex; gap: 6px; align-items: center; color: var(--text); font-size: 13.5px; margin: 0; font-weight: 400; }
+  details.adv { grid-column: 1 / -1; border-top: 1px dashed var(--line-strong); padding-top: 12px; }
+  details.adv summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  details.adv .form { margin-top: 12px; }
+  .actions { display: flex; gap: 12px; align-items: center; margin-top: 18px; }
+  .hint { color: var(--muted); font-size: 13px; }
+  .error { color: var(--bad); }
+  #output { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 18px; }
+  .out-head { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-bottom: 10px; }
+  .out-title { font-size: 17px; font-weight: 650; }
+  .out-summary { color: var(--ink-2); margin: 0 0 12px; max-width: 900px; }
+  .facts { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 13px; }
+  .facts b { color: var(--text); font-weight: 550; }
+  pre.view { background: var(--ink); color: var(--ink-text); padding: 16px 18px; border-radius: 10px; overflow: auto; max-height: 520px; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .chunk { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; }
+  .chunk .ch { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); border-radius: 10px 10px 0 0; font-size: 12.5px; color: var(--muted); }
+  .chunk pre { margin: 0; padding: 10px 12px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+
+  /* login */
+  .login-wrap { min-height: 100vh; display: grid; place-items: center; background: radial-gradient(1200px 500px at 50% -10%, #1e293b, var(--ink)); }
+  #login { width: min(400px, calc(100% - 32px)); padding: 28px; }
+  #login h1 { font-size: 18px; margin: 16px 0 4px; }
+  #login .brand { color: var(--text); }
+  #login input { width: 100%; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; margin: 16px 0 12px; }
+
+  /* drawer */
+  #scrim { position: fixed; inset: 0; background: rgba(15,23,42,.35); z-index: 5; opacity: 0; pointer-events: none; transition: opacity .2s; }
+  #scrim.open { opacity: 1; pointer-events: auto; }
+  #drawer { position: fixed; top: 0; right: 0; width: min(700px, 100%); height: 100%; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -16px 0 40px rgba(15,23,42,.18); transform: translateX(100%); transition: transform .22s ease; overflow-y: auto; z-index: 6; padding: 24px 28px; }
+  #drawer.open { transform: none; }
+  #drawer h3 { margin: 0; font-size: 18px; }
+  #drawer h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; }
+  dl { display: grid; grid-template-columns: 130px 1fr; gap: 8px 14px; margin: 18px 0 0; font-size: 13.5px; }
+  dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
+  #drawer pre { background: var(--panel-2); border: 1px solid var(--line); padding: 12px; border-radius: 8px; overflow-x: auto; font-family: var(--mono); font-size: 12px; margin: 0; }
+  #drawer .card { box-shadow: none; }
+  #drawer th, #drawer td { padding: 8px 10px; font-size: 13px; }
+
+  @media (max-width: 760px) {
+    .top { padding: 0 16px; gap: 10px; }
+    .top nav, #updated, .live .lbl { display: none; }
+    main { padding: 16px 16px 56px; }
+    .range button { padding: 7px 10px; font-size: 13px; }
+    #drawer { padding: 20px 16px; }
+    dl { grid-template-columns: 110px 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="login-wrap hidden" id="loginWrap">
+  <div id="login" class="card">
+    <span class="brand"><i></i>DOCVISION-LLM</span>
+    <h1>Dashboard</h1>
+    <div class="muted">Enter the access token (<code>DOCVISION_TOKEN</code>). It is kept only in this browser tab.</div>
+    <form id="loginForm">
+      <input id="token" type="password" autocomplete="current-password" placeholder="Access token" required>
+      <button class="btn primary" type="submit">Open dashboard</button>
+      <div class="error" id="loginError" style="margin-top:10px"></div>
+    </form>
+    <div class="hint" style="margin-top:18px"><a href="/_/doc" style="color:var(--accent);text-decoration:none">Read the docs →</a></div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <header class="top">
+    <a class="brand" href="/_/dashboard"><i></i>DOCVISION-LLM</a>
+    <nav><a class="on" href="/_/dashboard">Dashboard</a><a href="/_/doc">Docs</a></nav>
+    <span class="spacer"></span>
+    <button class="live" id="liveBadge" title="Requests queued or running"><span class="dot"></span><b id="liveCount">0</b><span class="lbl">in progress</span></button>
+    <span id="updated"></span>
+    <button class="btn primary" id="newBtn">New request</button>
+    <button class="link" id="logout">Sign out</button>
+  </header>
+
+  <main>
+    <section id="newPanel" class="card hidden">
+      <div class="head">
+        <h2>New request</h2>
+        <div class="seg" id="opTabs"><button data-op="convert" class="on">Convert</button><button data-op="summarize">Title &amp; summary</button><button data-op="chunk">Chunk</button><button data-op="extract">Extract JSON</button></div>
+        <span class="spacer"></span>
+        <button class="link" id="closeNew">Close ✕</button>
+      </div>
+
+      <form id="form" autocomplete="off">
+        <div class="form">
+          <div class="field full" data-for="convert">
+            <label for="f_source">Source</label>
+            <input type="text" id="f_source" placeholder="/absolute/path/report.pdf, https://… or s3://bucket/key">
+          </div>
+          <div class="field full" data-for="summarize chunk extract">
+            <label for="f_text">Text or Markdown</label>
+            <textarea id="f_text" placeholder="Paste text here, or leave empty and give a source below."></textarea>
+          </div>
+          <div class="field full" data-for="summarize chunk extract">
+            <label for="f_tsource">…or a text / Markdown source</label>
+            <input type="text" id="f_tsource" placeholder="/path/notes.md or https://…">
+          </div>
+          <div class="field full" data-for="convert extract">
+            <label for="f_schema">JSON Schema for structured data <span data-for="convert">(optional)</span> · <button type="button" class="link" id="exampleSchema" style="padding:0;color:var(--accent)">use receipt example</button></label>
+            <textarea id="f_schema" style="min-height:110px" placeholder='{"type": "object", "properties": {"total": {"type": "number"}}, "required": ["total"]}'></textarea>
+          </div>
+          <div class="field">
+            <label for="f_requester">Requester ID</label>
+            <input type="text" id="f_requester" placeholder="unknown">
+          </div>
+          <div class="field" data-for="convert">
+            <label for="f_exec">Execution</label>
+            <select id="f_exec"><option value="sync">Sync (wait here)</option><option value="async">Async (background job)</option></select>
+          </div>
+          <div class="field" data-for="convert">
+            <label for="f_ocr">PDF / image OCR</label>
+            <select id="f_ocr"><option value="on">on (LLM)</option><option value="auto">auto</option><option value="off">off (native text)</option></select>
+          </div>
+          <div class="field" data-for="convert">
+            <label for="f_cache">Cache</label>
+            <select id="f_cache"><option value="use">use</option><option value="bypass">bypass</option><option value="refresh">refresh</option></select>
+          </div>
+          <div class="field" data-for="convert summarize">
+            <label for="f_tmethod">Title method</label>
+            <select id="f_tmethod"><option value="llm">llm</option><option value="local">local</option></select>
+          </div>
+          <div class="field" data-for="convert summarize">
+            <label for="f_smethod">Summary method</label>
+            <select id="f_smethod"><option value="llm">llm</option><option value="local">local</option></select>
+          </div>
+          <div class="field" data-for="convert chunk">
+            <label for="f_csize">Chunk size (tokens)</label>
+            <input type="number" id="f_csize" min="1" placeholder="512">
+          </div>
+          <div class="field" data-for="convert chunk">
+            <label for="f_coverlap">Chunk overlap (tokens)</label>
+            <input type="number" id="f_coverlap" min="0" placeholder="15% of size">
+          </div>
+          <div class="field full" data-for="convert summarize">
+            <div class="checks">
+              <label><input type="checkbox" id="f_gtitle" checked> Title</label>
+              <label><input type="checkbox" id="f_gsummary" checked> Summary</label>
+              <label data-for="convert"><input type="checkbox" id="f_gchunks" checked> Chunks</label>
+              <label data-for="convert"><input type="checkbox" id="f_partial"> Allow partial</label>
+            </div>
+          </div>
+          <details class="adv" data-for="convert summarize extract">
+            <summary>LLM override<span data-for="convert"> and destination</span></summary>
+            <div class="form">
+              <div class="field"><label for="f_provider">Provider</label><input type="text" id="f_provider" placeholder="default"></div>
+              <div class="field"><label for="f_model">Model</label><input type="text" id="f_model" placeholder="default"></div>
+              <div class="field"><label for="f_key">API key</label><input type="password" id="f_key" placeholder="default"></div>
+              <div class="field"><label for="f_base">Base URL</label><input type="text" id="f_base" placeholder="default"></div>
+              <div class="field full" data-for="convert"><label for="f_dest">Destination (.md, runs as a background job)</label><input type="text" id="f_dest" placeholder="/out/report.md or s3://bucket/out/report.md"></div>
+            </div>
+          </details>
+        </div>
+        <div class="actions">
+          <button class="btn primary" type="submit" id="submitBtn">Convert</button>
+          <span class="hint" id="formStatus"></span>
+        </div>
+      </form>
+      <div id="output" class="hidden"></div>
+    </section>
+
+    <div class="section" style="margin-top:4px">
+      <div class="section-head"><h2>Right now</h2><span class="sub" id="llm"></span></div>
+      <div class="grid" id="live"></div>
+    </div>
+
+    <div class="section hidden" id="progressSection">
+      <div class="section-head"><h2>In progress</h2><span class="count" id="progressCount">0</span></div>
+      <div class="card tablewrap" id="progress"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <h2>Activity</h2><span class="sub" id="windowLabel"></span>
+        <div class="tools"><div class="range" id="windows" role="tablist" aria-label="Time range"><button data-w="1h">1 hour</button><button data-w="24h" class="on">24 hours</button><button data-w="7d">7 days</button><button data-w="30d">30 days</button></div></div>
+      </div>
+      <div class="grid" id="overview"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-head"><h2>Breakdown</h2><span class="sub">click a requester or format to filter requests</span></div>
+      <div class="breakdowns">
+        <div class="card bars" id="byRequester"></div>
+        <div class="card bars" id="byFormat"></div>
+        <div class="card bars" id="byModel"></div>
+        <div class="card bars" id="byStatus"></div>
+        <div class="card bars" id="byOperation"></div>
+      </div>
+    </div>
+
+    <section class="section card panel" id="requestsPanel" data-key="requests" data-default="open">
+      <div class="panel-head">
+        <button class="toggle" type="button"><span class="chev">▼</span>Requests</button>
+        <div class="tools filters">
+          <input type="text" id="fltRequester" placeholder="Requester ID" list="requesters" style="width:160px">
+          <datalist id="requesters"></datalist>
+          <select id="fltOperation"><option value="">All operations</option><option>convert</option><option>summarize</option><option>chunk</option><option>extract</option></select>
+          <select id="fltFormat"><option value="">All formats</option><option>pdf</option><option>docx</option><option>xlsx</option><option>pptx</option><option>html</option><option>markdown</option><option>text</option><option>png</option><option>jpeg</option><option>webp</option><option>odt</option><option>ods</option><option>odp</option><option>epub</option></select>
+          <select id="fltStatus"><option value="">Any status</option><option>completed</option><option>partial</option><option>failed</option><option>queued</option><option>running</option></select>
+          <button class="link" id="clearFilters" type="button">Clear</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="tablewrap" id="recent"></div>
+        <div class="pager" id="recentPager"></div>
+      </div>
+    </section>
+
+    <section class="section card panel" id="failuresPanel" data-key="failures" data-default="collapsed">
+      <div class="panel-head">
+        <button class="toggle" type="button"><span class="chev">▼</span>Recent failures <span class="count" id="failCount">0</span></button>
+      </div>
+      <div class="panel-body">
+        <div class="tablewrap" id="failures"></div>
+        <div class="pager" id="failuresPager"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="scrim"></div>
+<aside id="drawer"></aside>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const KEY = "docvision.token";
+  let windowSel = "24h", op = "convert", timer = null, busy = false;
+
+  // Per-viewer UI memory (collapsed panels). Storage may be unavailable; the page works without it.
+  const store = {
+    get(k) { try { return localStorage.getItem("docvision." + k); } catch (_) { return null; } },
+    set(k, v) { try { localStorage.setItem("docvision." + k, v); } catch (_) {} },
+  };
+
+  // ---- helpers (values are always inserted as text, never as HTML) ----
+  function el(tag, attrs = {}, ...children) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") e.className = v; else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v);
+    }
+    for (const c of children) if (c !== null && c !== undefined && c !== false) e.append(c instanceof Node ? c : String(c));
+    return e;
+  }
+  const num = (n) => (n === null || n === undefined) ? "—" : Number(n).toLocaleString();
+  const ms = (v) => v == null ? "—" : v < 1000 ? v + " ms" : v < 60000 ? (v / 1000).toFixed(1) + " s" : (v / 60000).toFixed(1) + " min";
+  const ago = (iso) => {
+    if (!iso) return "—";
+    const s = (Date.now() - Date.parse(iso)) / 1000;
+    if (s < 60) return Math.max(0, Math.round(s)) + "s ago";
+    if (s < 3600) return Math.round(s / 60) + "m ago";
+    if (s < 86400) return Math.round(s / 3600) + "h ago";
+    return new Date(iso).toLocaleString();
+  };
+  // Rejected/cancelled/interrupted requests never ran; their execution_status holds a code.
+  const shownStatus = (i) => ["rejected", "cancelled", "interrupted"].includes(i.request_status) ? i.request_status : (i.execution_status || i.request_status);
+  const statusClass = (s) => ["completed", "accepted", "delivered", "sent"].includes(s) ? "ok" : ["failed", "rejected", "interrupted"].includes(s) ? "bad" : ["queued", "running"].includes(s) ? "run" : ["partial", "cancelled", "truncated", "rate_limited"].includes(s) ? "warn" : "";
+  const pill = (s) => el("span", { class: "pill " + statusClass(s) }, s || "—");
+  const model = (i) => i.llm_model ? el("span", { class: "tag", title: (i.llm_provider || "") + " / " + i.llm_model }, i.llm_model) : el("span", { class: "muted" }, "—");
+  const requester = (r) => el("span", { class: "tag" }, r || "unknown");
+  const fmt = (f) => f ? el("span", { class: "fmt" }, f) : el("span", { class: "muted" }, "—");
+  const tokens = (u) => u && (u.input_tokens || u.output_tokens) ? num((u.input_tokens || 0) + (u.output_tokens || 0)) : "—";
+  const kpi = (label, value, sub, cls, meter) => el("div", { class: "card kpi" },
+    el("div", { class: "label" }, label), el("div", { class: "value " + (cls || "") }, value),
+    sub ? el("div", { class: "sub" }, sub) : null,
+    meter != null ? el("div", { class: "meter" }, el("span", { style: `width:${Math.min(100, meter)}%` })) : null);
+
+  async function rpc(operation, payload = {}, options = {}) {
+    const r = await fetch("/rpc", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-ACCESS-TOKEN": sessionStorage.getItem(KEY) || "" },
+      body: JSON.stringify({ operation, payload, options }),
+    });
+    if (r.status === 401) { signOut("Invalid token."); throw new Error("unauthorized"); }
+    const body = await r.json();
+    if (!body.ok) {
+      const e = new Error(body.error ? body.error.message : "request failed");
+      e.code = body.error && body.error.code;
+      e.data = body.data;
+      throw e;
+    }
+    return body.data;
+  }
+
+  function bars(container, title, entries, onClick) {
+    container.replaceChildren(el("h3", {}, title));
+    if (!entries.length) { container.append(el("div", { class: "muted", style: "font-size:13px" }, "No data")); return; }
+    const max = Math.max(...entries.map((e) => e[1]));
+    for (const [k, v] of entries.slice(0, 8)) {
+      container.append(el("div", { class: "row" + (onClick ? " click" : ""), onclick: onClick ? () => onClick(k) : null },
+        el("span", { class: "name", title: k }, k), el("span", { class: "n" }, num(v)),
+        el("div", { class: "bar" }, el("span", { style: `width:${(v / max) * 100}%` }))));
+    }
+  }
+  const sorted = (m) => Object.entries(m || {}).sort((a, b) => b[1] - a[1]);
+  const named = (list) => (list || []).map((x) => [x.name, x.count]);
+
+  function table(container, headers, rows, onRow, emptyText) {
+    container.replaceChildren();
+    if (!rows.length) { container.append(el("div", { class: "empty" }, emptyText || "Nothing here yet")); return; }
+    const thead = el("thead", {}, el("tr", {}, ...headers.map(([h, cls]) => el("th", { class: cls || "" }, h))));
+    const tbody = el("tbody");
+    for (const r of rows) {
+      tbody.append(el("tr", onRow ? { class: "click", onclick: () => onRow(r.raw) } : {}, ...r.cells.map(([c, cls]) => el("td", { class: cls || "" }, c))));
+    }
+    container.append(el("table", {}, thead, tbody));
+  }
+
+  // ---- collapsible panels ----
+  function setupPanel(panel, onOpen) {
+    const k = "panel." + panel.dataset.key;
+    const saved = store.get(k);
+    const collapsed = saved ? saved === "collapsed" : panel.dataset.default === "collapsed";
+    panel.classList.toggle("collapsed", collapsed);
+    panel.querySelector(".toggle").onclick = () => {
+      const now = !panel.classList.contains("collapsed");
+      panel.classList.toggle("collapsed", now);
+      store.set(k, now ? "collapsed" : "open");
+      if (!now) onOpen();
+    };
+  }
+  const isOpen = (panel) => !panel.classList.contains("collapsed");
+
+  // ---- pagination: history cursors are stable, so a page never shifts while new requests arrive ----
+  function pager(name, render) {
+    return { name, cursors: [null], i: 0, next: null, render };
+  }
+  const pages = {
+    recent: pager("recent", renderRecent),
+    failures: pager("failures", renderFailures),
+  };
+  function resetPage(p) { p.cursors = [null]; p.i = 0; p.next = null; }
+  function drawPager(p, container, count) {
+    const newer = el("button", { class: "btn sm", type: "button", onclick: () => { p.i--; loadPage(p); } }, "‹ Newer");
+    const older = el("button", { class: "btn sm", type: "button", onclick: () => { p.cursors[p.i + 1] = p.next; p.i++; loadPage(p); } }, "Older ›");
+    newer.disabled = p.i === 0;
+    older.disabled = !p.next;
+    container.replaceChildren(el("span", {}, "Page " + (p.i + 1) + (count ? " · " + count + " shown" : "")), el("span", { class: "spacer" }), newer, older);
+  }
+  async function loadPage(p) {
+    try {
+      const data = await rpc("history.list", Object.assign(p === pages.recent ? requestFilters() : { limit: 10, execution_status: "failed" }, p.cursors[p.i] ? { cursor: p.cursors[p.i] } : {}));
+      p.next = data.next_cursor;
+      p.render(data.items || []);
+    } catch (e) {
+      if (e.code === "invalid_cursor") { resetPage(p); loadPage(p); }
+    }
+  }
+
+  // ---- dashboard ----
+  function renderStats(s) {
+    const L = s.live;
+    $("llm").textContent = L.default_llm ? "Default LLM · " + L.default_llm : "No default LLM configured";
+    const providers = Object.values(L.providers || {});
+    const health = providers.includes("open") ? ["Failing fast", "bad"] : providers.includes("half_open") ? ["Recovering", "warn"] : ["Healthy", "ok"];
+    const memPct = L.memory_budget_kib ? Math.round((L.memory_in_use_kib / L.memory_budget_kib) * 100) : 0;
+    $("live").replaceChildren(
+      kpi("Running", num(L.running), "of " + num(L.max_running) + " slots", "", L.max_running ? (L.running / L.max_running) * 100 : 0),
+      kpi("Queued", num(L.queued), "waiting to start"),
+      kpi("Memory reserved", memPct + "%", Math.round(L.memory_in_use_kib / 1024) + " of " + Math.round(L.memory_budget_kib / 1024) + " MiB", "", memPct),
+      kpi("LLM provider", providers.length ? health[0] : "Idle", null, providers.length ? health[1] : ""),
+      kpi("Database", L.db_writer_alive ? "OK" : "Down", null, L.db_writer_alive ? "ok" : "bad"),
+      kpi("Uptime", ms(L.uptime_ms)),
+    );
+    const r = s.requests, st = r.by_status || {}, l = s.llm;
+    $("windowLabel").textContent = "since " + new Date(s.since).toLocaleString() + (s.truncated ? " · first 100,000 requests" : "");
+    $("overview").replaceChildren(
+      kpi("Requests", num(r.total)),
+      kpi("Completed", num(st.completed || 0), null, "ok"),
+      kpi("Failed", num(st.failed || 0), (st.partial ? num(st.partial) + " partial · " : "") + num(st.rejected || 0) + " rejected", st.failed ? "bad" : ""),
+      kpi("Duration", ms(s.duration_ms.avg), "p95 " + ms(s.duration_ms.p95)),
+      kpi("Pages", num(s.documents.pages), num(s.documents.words) + " words"),
+      kpi("LLM calls", num(l.calls), l.failed_calls ? num(l.failed_calls) + " failed attempts" : "no failures", l.failed_calls ? "warn" : ""),
+      kpi("Tokens", num((l.input_tokens || 0) + (l.output_tokens || 0)), num(l.input_tokens) + " in · " + num(l.output_tokens) + " out"),
+    );
+    const focus = () => { $("requestsPanel").classList.remove("collapsed"); $("requestsPanel").scrollIntoView({ behavior: "smooth", block: "start" }); };
+    bars($("byRequester"), "Top requesters", named(r.by_requester), (name) => { $("fltRequester").value = name; filtersChanged(); focus(); });
+    bars($("byFormat"), "By format", sorted(r.by_format), (f) => { $("fltFormat").value = f; filtersChanged(); focus(); });
+    bars($("byModel"), "Models", named(r.by_model));
+    bars($("byStatus"), "By status", sorted(st));
+    bars($("byOperation"), "By operation", sorted(r.by_operation));
+    $("requesters").replaceChildren(...(r.by_requester || []).map((x) => el("option", { value: x.name })));
+    const failed = st.failed || 0;
+    $("failCount").textContent = num(failed);
+    $("failCount").className = "count" + (failed ? " bad" : "");
+  }
+
+  const REQ_HEAD = [["When"], ["Requester"], ["Operation"], ["Format"], ["Source"], ["Model"], ["Status"], ["Duration", "num"], ["Pages", "num"], ["Tokens", "num"]];
+  function renderRecent(items) {
+    table($("recent"), REQ_HEAD, items.map((i) => ({
+      raw: i,
+      cells: [
+        [ago(i.created_at)], [requester(i.requester_id)],
+        [i.operation + (i.execution ? " · " + i.execution : "")],
+        [fmt(i.format || (i.statistics && i.statistics.format))],
+        [i.source || "—", "src"], [model(i)], [pill(shownStatus(i))],
+        [ms(i.timings && i.timings.total_ms), "num"],
+        [i.statistics && i.statistics.original_total_pages != null ? num(i.statistics.original_total_pages) : "—", "num"],
+        [tokens(i.usage), "num"],
+      ],
+    })), openDetail, "No requests match these filters");
+    drawPager(pages.recent, $("recentPager"), items.length);
+  }
+  function renderFailures(items) {
+    table($("failures"), [["When"], ["Requester"], ["Operation"], ["Format"], ["Source"], ["Code"], ["Stage"], ["Message"]], items.map((i) => ({
+      raw: i,
+      cells: [
+        [ago(i.created_at)], [requester(i.requester_id)], [i.operation + (i.execution ? " · " + i.execution : "")],
+        [fmt(i.format)], [i.source || "—", "src"],
+        [el("span", { class: "mono" }, (i.error && i.error.code) || "—")], [(i.error && i.error.stage) || "—"],
+        [(i.error && i.error.message) || "", "wrap"],
+      ],
+    })), openDetail, "No failures");
+    drawPager(pages.failures, $("failuresPager"), items.length);
+  }
+
+  function renderProgress(items) {
+    const n = items.length, label = n >= 100 ? "100+" : String(n);
+    $("liveCount").textContent = label;
+    $("liveBadge").classList.toggle("active", n > 0);
+    $("progressSection").classList.toggle("hidden", n === 0);
+    $("progressCount").textContent = label;
+    table($("progress"), [["Started"], ["Requester"], ["Operation"], ["Source"], ["Status"], ["Stage"], ["Job"]],
+      items.map((i) => ({ raw: i, cells: [[ago(i.created_at)], [requester(i.requester_id)], [i.operation + (i.execution ? " · " + i.execution : "")], [i.source || "—", "src"], [pill(shownStatus(i))], [i.execution_stage || "—"], [el("span", { class: "mono" }, i.job_id ? i.job_id.slice(0, 13) + "…" : "—")]] })),
+      openDetail);
+  }
+
+  function requestFilters() {
+    const p = { limit: 25 };
+    const r = $("fltRequester").value.trim(), o = $("fltOperation").value, f = $("fltFormat").value, s = $("fltStatus").value;
+    if (r) p.requester_id = r;
+    if (o) p.operation = o;
+    if (f) p.format = f;
+    if (s) p.execution_status = s;
+    return p;
+  }
+  function filtersChanged() { resetPage(pages.recent); loadPage(pages.recent); }
+
+  async function refresh() {
+    if (busy) return;
+    busy = true;
+    try {
+      const jobs = [rpc("stats", { window: windowSel }), rpc("history.list", { limit: 100, in_progress: true })];
+      const [s, p] = await Promise.all(jobs);
+      renderStats(s);
+      renderProgress(p.items || []);
+      // Only the visible page of each open panel is refreshed.
+      const loads = [];
+      if (isOpen($("requestsPanel"))) loads.push(loadPage(pages.recent));
+      if (isOpen($("failuresPanel"))) loads.push(loadPage(pages.failures));
+      await Promise.all(loads);
+      $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+    } catch (e) {
+      if (e.message !== "unauthorized") $("updated").textContent = "Update failed: " + e.message;
+    } finally { busy = false; }
+  }
+
+  // ---- request detail ----
+  function closeDrawer() { $("drawer").classList.remove("open"); $("scrim").classList.remove("open"); }
+  async function openDetail(item) {
+    const d = $("drawer");
+    d.replaceChildren(el("div", { class: "muted" }, "Loading…"));
+    d.classList.add("open"); $("scrim").classList.add("open");
+    try {
+      const g = await rpc("history.get", { request_id: item.request_id, limit: 100 });
+      const q = g.request, calls = g.calls.items || [], first = calls[0];
+      const llm = q.llm_model ? q.llm_provider + " / " + q.llm_model : first ? first.provider + " / " + first.model : "— (no LLM call)";
+      const st = q.statistics || {}, u = q.usage || {};
+      const parts = [
+        el("div", { style: "display:flex;align-items:center;gap:12px" },
+          el("h3", {}, q.operation + (q.execution ? " · " + q.execution : "")), pill(shownStatus(q)),
+          el("span", { class: "spacer" }), el("button", { class: "link", onclick: closeDrawer }, "Close ✕")),
+        el("dl", {},
+          el("dt", {}, "Requester"), el("dd", {}, q.requester_id || "unknown"),
+          el("dt", {}, "Provider / model"), el("dd", {}, llm),
+          el("dt", {}, "Source"), el("dd", {}, q.source || "—"),
+          el("dt", {}, "Format"), el("dd", {}, q.format || st.format || "—"),
+          el("dt", {}, "Created"), el("dd", {}, q.created_at ? new Date(q.created_at).toLocaleString() : "—"),
+          el("dt", {}, "Duration"), el("dd", {}, ms(q.timings && q.timings.total_ms)),
+          el("dt", {}, "Pages · words"), el("dd", {}, num(st.original_total_pages) + " · " + num(st.total_words)),
+          el("dt", {}, "Tokens"), el("dd", {}, u.calls ? num(u.input_tokens) + " in · " + num(u.output_tokens) + " out · " + num(u.calls) + " calls" : "—"),
+          el("dt", {}, "Request ID"), el("dd", { class: "mono" }, q.request_id),
+          el("dt", {}, "Job ID"), el("dd", { class: "mono" }, q.job_id || "—"),
+        ),
+      ];
+      if (q.error) parts.push(el("h4", {}, "Error"), el("pre", {}, JSON.stringify(q.error, null, 2)));
+      const evBox = el("div", { class: "card tablewrap" });
+      table(evBox, [["Time"], ["Stage"], ["Event"], ["Detail"]], (g.events.items || []).map((e) => {
+        let detail = e.detail || "";
+        try { const j = JSON.parse(detail); if (j && j.ms !== undefined) detail = ms(j.ms); } catch (_) {}
+        return { cells: [[new Date(e.at).toLocaleTimeString()], [e.stage], [pill(e.event)], [detail, "wrap"]] };
+      }), null, "No events");
+      parts.push(el("h4", {}, "Timeline"), evBox);
+      const callBox = el("div", { class: "card tablewrap" });
+      table(callBox, [["Purpose"], ["Provider / model"], ["Part"], ["Status"], ["Time", "num"], ["In / out", "num"]],
+        calls.map((c) => ({ cells: [[c.purpose], [el("span", { class: "tag", title: c.endpoint || "" }, c.provider + " / " + c.model)], [c.source_pages_or_chunks || "—"], [pill(c.status === "ok" ? "completed" : c.status)], [ms(c.duration_ms), "num"], [num(c.input_tokens) + " / " + num(c.output_tokens), "num"]] })),
+        null, "No LLM calls");
+      parts.push(el("h4", {}, "LLM calls"), callBox);
+      if (q.options) parts.push(el("h4", {}, "Options"), el("pre", {}, JSON.stringify(q.options, null, 2)));
+      if (q.metadata) parts.push(el("h4", {}, "Metadata"), el("pre", {}, JSON.stringify(q.metadata, null, 2)));
+      d.replaceChildren(...parts);
+    } catch (e) {
+      d.replaceChildren(el("div", { class: "error" }, e.message));
+    }
+  }
+
+  // ---- new request ----
+  function setOp(next) {
+    op = next;
+    for (const b of $("opTabs").children) b.classList.toggle("on", b.dataset.op === op);
+    document.querySelectorAll("#form [data-for]").forEach((n) => n.classList.toggle("hidden", !n.dataset.for.split(" ").includes(op)));
+    $("submitBtn").textContent = { convert: "Convert", chunk: "Chunk", extract: "Extract", summarize: "Generate" }[op];
+  }
+  const val = (id) => $(id).value.trim();
+  const intVal = (id) => { const v = val(id); return v === "" ? undefined : parseInt(v, 10); };
+
+  function buildRequest() {
+    const payload = {}, options = {};
+    const requesterId = val("f_requester");
+    if (requesterId) payload.requester_id = requesterId;
+    if (op === "convert") {
+      payload.source = val("f_source");
+      if (!payload.source) throw new Error("Source is required.");
+      options.execution = $("f_exec").value;
+      options.ocr = $("f_ocr").value;
+      options.cache = $("f_cache").value;
+      options.gen_chunks = $("f_gchunks").checked;
+      options.allow_partial = $("f_partial").checked;
+      const dest = val("f_dest");
+      if (dest) { payload.destination = dest; options.execution = "async"; }
+    } else {
+      const text = $("f_text").value, src = val("f_tsource");
+      if (text.trim()) payload.source_content = text;
+      else if (src) payload.source = src;
+      else throw new Error("Paste some text or give a source.");
+    }
+    const schemaText = $("f_schema").value.trim();
+    if (op === "extract" && !schemaText) throw new Error("A JSON Schema is required.");
+    if ((op === "convert" || op === "extract") && schemaText) {
+      try { options.extract_schema = JSON.parse(schemaText); } catch (_) { throw new Error("The JSON Schema is not valid JSON."); }
+    }
+    if (op === "convert" || op === "summarize") {
+      options.gen_title = $("f_gtitle").checked;
+      options.gen_summary = $("f_gsummary").checked;
+      options.title_method = $("f_tmethod").value;
+      options.summary_method = $("f_smethod").value;
+    }
+    if (op !== "chunk") {
+      for (const [id, k] of [["f_provider", "llm_provider"], ["f_model", "llm_model"], ["f_key", "llm_api_key"], ["f_base", "llm_base_url"]]) {
+        if (val(id)) options[k] = val(id);
+      }
+    }
+    if (op === "convert" || op === "chunk") {
+      if (intVal("f_csize") !== undefined) options.chunk_size = intVal("f_csize");
+      if (intVal("f_coverlap") !== undefined) options.chunk_overlap = intVal("f_coverlap");
+    }
+    return { payload, options };
+  }
+
+  function showOutput(data, kind) {
+    const out = $("output");
+    out.classList.remove("hidden");
+    const parts = [];
+    const head = el("div", { class: "out-head" });
+    if (data.status) head.append(pill(data.status));
+    if (data.title) head.append(el("span", { class: "out-title" }, data.title));
+    if (head.childNodes.length) parts.push(head);
+    if (data.summary) parts.push(el("p", { class: "out-summary" }, data.summary));
+    const facts = el("div", { class: "facts" });
+    const fact = (k, v) => facts.append(el("span", {}, k + " ", el("b", {}, v)));
+    if (data.format) fact("Format", data.format);
+    if (data.statistics) {
+      fact("Words", num(data.statistics.total_words));
+      if (data.statistics.original_total_pages != null) fact("Pages", num(data.statistics.original_total_pages));
+    }
+    if (data.chunks) fact("Chunks", num(data.chunks.length));
+    const t = data.llm && data.llm.totals;
+    if (t && t.calls) { fact("Model", (t.provider || "") + " / " + (t.model || "")); fact("Tokens", num((t.input_tokens || 0) + (t.output_tokens || 0))); }
+    if (data.timing) fact("Time", ms(data.timing.total_ms));
+    if (data.cache_hit) fact("Cache", "hit");
+    if (facts.childNodes.length) parts.push(facts);
+    if (data.warnings && data.warnings.length) parts.push(el("div", { class: "hint warn", style: "margin-top:8px" }, "Warnings: " + data.warnings.join(" · ")));
+    if (data.error) parts.push(el("div", { class: "error", style: "margin-top:8px" }, (data.error.code || "error") + ": " + (data.error.message || "")));
+
+    const views = [];
+    if (data.extracted != null) views.push(["Extracted", () => el("pre", { class: "view" }, JSON.stringify(data.extracted, null, 2)), () => JSON.stringify(data.extracted, null, 2)]);
+    const xs = data.feature_status && data.feature_status.extraction;
+    if (xs && xs.status === "failed") parts.push(el("div", { class: "error", style: "margin-top:8px" }, "Structured extraction failed: " + xs.error));
+    if (kind === "convert" && data.content != null) views.push(["Markdown", () => el("pre", { class: "view" }, data.content || "(empty)"), () => data.content]);
+    if (data.chunks && data.chunks.length) views.push(["Chunks", () => {
+      const box = el("div");
+      for (const c of data.chunks) box.append(el("div", { class: "chunk" },
+        el("div", { class: "ch" }, el("b", {}, "#" + c.index), el("span", {}, num(c.tokens) + " tokens"), c.headings && c.headings.length ? el("span", {}, c.headings.join(" › ")) : null),
+        el("pre", {}, c.content)));
+      return box;
+    }, () => data.chunks.map((c) => c.content).join("\n\n---\n\n")]);
+    views.push(["JSON", () => el("pre", { class: "view" }, JSON.stringify(data, null, 2)), () => JSON.stringify(data, null, 2)]);
+    const seg = el("div", { class: "seg" });
+    const body = el("div", { style: "margin-top:10px" });
+    const copy = el("button", { class: "link", type: "button" }, "Copy");
+    let current = 0;
+    const show = (i) => {
+      current = i;
+      [...seg.children].forEach((b, j) => b.classList.toggle("on", i === j));
+      body.replaceChildren(views[i][1]());
+    };
+    views.forEach(([name], i) => seg.append(el("button", { type: "button", onclick: () => show(i) }, name)));
+    copy.onclick = () => {
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText(views[current][2]() || "").then(() => { copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200); });
+    };
+    parts.push(el("div", { style: "display:flex;align-items:center;gap:8px;margin-top:16px" }, seg, el("span", { class: "spacer" }), copy), body);
+    out.replaceChildren(...parts);
+    show(0);
+  }
+
+  async function waitForJob(jobId) {
+    const status = $("formStatus");
+    for (;;) {
+      const w = await rpc("job.wait", { job_id: jobId, timeout_ms: 25000 });
+      status.textContent = "Job " + jobId.slice(0, 13) + "… " + w.status;
+      if (!["queued", "running"].includes(w.status)) break;
+    }
+    const g = await rpc("job.get", { job_id: jobId });
+    return g.result || { status: g.status, error: g.error };
+  }
+
+  $("form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const status = $("formStatus"), btn = $("submitBtn");
+    let req;
+    try { req = buildRequest(); } catch (e) { status.className = "hint error"; status.textContent = e.message; return; }
+    status.className = "hint"; status.textContent = "Working…"; btn.disabled = true;
+    $("output").classList.add("hidden");
+    const t0 = performance.now();
+    try {
+      let data = await rpc(op, req.payload, req.options);
+      if (op === "convert" && req.options.execution === "async" && data.job_id) {
+        status.textContent = "Queued as job " + data.job_id.slice(0, 13) + "…";
+        refresh();
+        data = await waitForJob(data.job_id);
+      }
+      showOutput(data, op);
+      status.textContent = "Done in " + ms(Math.round(performance.now() - t0));
+    } catch (e) {
+      if (e.message === "unauthorized") return;
+      status.className = "hint error";
+      status.textContent = (e.code ? e.code + ": " : "") + e.message;
+      if (e.data) showOutput(e.data, op);
+    } finally {
+      btn.disabled = false;
+      refresh();
+    }
+  };
+
+  // ---- wiring ----
+  function start() {
+    $("loginWrap").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    refresh();
+    clearInterval(timer);
+    timer = setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  }
+  function signOut(msg) {
+    sessionStorage.removeItem(KEY);
+    clearInterval(timer);
+    $("app").classList.add("hidden");
+    closeDrawer();
+    $("loginWrap").classList.remove("hidden");
+    $("loginError").textContent = msg || "";
+  }
+  $("loginForm").onsubmit = async (ev) => {
+    ev.preventDefault();
+    sessionStorage.setItem(KEY, $("token").value.trim());
+    $("token").value = "";
+    try { await rpc("history.list", { limit: 1 }); start(); } catch (_) { /* signOut already shown */ }
+  };
+  $("logout").onclick = () => signOut();
+  $("newBtn").onclick = () => {
+    const p = $("newPanel");
+    p.classList.toggle("hidden");
+    if (!p.classList.contains("hidden")) { window.scrollTo({ top: 0, behavior: "smooth" }); (op === "convert" ? $("f_source") : $("f_text")).focus(); }
+  };
+  $("exampleSchema").onclick = () => {
+    $("f_schema").value = JSON.stringify({
+      type: "object",
+      required: ["merchant", "total"],
+      properties: {
+        merchant: { type: "string" },
+        date: { type: ["string", "null"], description: "YYYY-MM-DD" },
+        currency: { type: ["string", "null"], description: "ISO 4217 code" },
+        total: { type: "number" },
+        tax: { type: ["number", "null"] },
+        items: { type: "array", items: { type: "object", properties: { name: { type: "string" }, qty: { type: "number" }, price: { type: "number" } } } },
+      },
+    }, null, 2);
+  };
+  $("closeNew").onclick = () => $("newPanel").classList.add("hidden");
+  $("opTabs").onclick = (ev) => { if (ev.target.dataset.op) setOp(ev.target.dataset.op); };
+  $("liveBadge").onclick = () => { if (!$("progressSection").classList.contains("hidden")) $("progressSection").scrollIntoView({ behavior: "smooth", block: "start" }); };
+  $("windows").onclick = (ev) => {
+    const w = ev.target.dataset.w;
+    if (!w) return;
+    windowSel = w;
+    for (const b of $("windows").children) b.classList.toggle("on", b === ev.target);
+    refresh();
+  };
+  let debounce;
+  $("fltRequester").oninput = () => { clearTimeout(debounce); debounce = setTimeout(filtersChanged, 300); };
+  for (const id of ["fltOperation", "fltFormat", "fltStatus"]) $(id).onchange = filtersChanged;
+  $("clearFilters").onclick = () => { for (const id of ["fltRequester", "fltOperation", "fltFormat", "fltStatus"]) $(id).value = ""; filtersChanged(); };
+  setupPanel($("requestsPanel"), () => loadPage(pages.recent));
+  setupPanel($("failuresPanel"), () => loadPage(pages.failures));
+  $("scrim").onclick = closeDrawer;
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+
+  setOp("convert");
+  if (sessionStorage.getItem(KEY)) start(); else signOut();
+})();
+</script>
+</body>
+</html>

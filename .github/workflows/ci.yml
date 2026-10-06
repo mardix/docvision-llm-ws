@@ -1,0 +1,97 @@
+name: ci
+
+# Disabled: runs only when started by hand (Actions tab -> ci -> Run workflow).
+# To re-enable on every push and pull request, restore:
+#   push:
+#     branches: [main]
+#   pull_request:
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      # Build the binary alone too: test-only dependencies can enable crate features
+      # (e.g. reqwest/json) that a release build would not have.
+      - run: cargo build --no-default-features --bin docvision-llm-ws
+      - run: cargo build --all-features --bin docvision-llm-ws
+      - name: No OpenSSL / Clap / legacy-Office parsers in the normal dependency tree
+        run: |
+          for c in openssl-sys native-tls clap calamine cfb redis; do
+            # `-i` prints nothing (exit 0) for crates that only appear as dev-dependencies.
+            if [ -n "$(cargo tree -q -e normal --all-features -i "$c" 2>/dev/null)" ]; then echo "forbidden crate: $c"; exit 1; fi
+          done
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["", "--no-default-features", "--all-features"]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test ${{ matrix.features }}
+        env:
+          # Opt-in PostgreSQL run of the shared repository contract suite.
+          DOCVISION_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-udeps,cargo-bloat
+      - run: cargo +nightly udeps --all-targets
+      - run: cargo +nightly udeps --all-targets --all-features
+      - name: cargo bloat report
+        run: cargo bloat --release --crates -n 30 | tee bloat.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloat
+          path: bloat.txt
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: docker buildx build --load -t docvision-llm-ws:core .
+      - name: Image size and idle RSS of the container
+        run: |
+          size=$(docker image inspect docvision-llm-ws:core --format '{{.Size}}')
+          echo "core image: $((size/1048576)) MiB"; test "$size" -le $((25*1048576))
+          docker run -d --name d2m --read-only -e DOCVISION_TOKEN=ci-token-0123456789abcdef -v d2m:/data -p 4242:4242 docvision-llm-ws:core
+          for i in $(seq 1 50); do curl -sf localhost:4242/livez && break; sleep 0.1; done
+          sleep 1
+          pid=$(docker inspect -f '{{.State.Pid}}' d2m)
+          rss=$(sudo awk '/VmRSS/{print $2}' /proc/$pid/status)
+          echo "container idle RSS: $((rss/1024)) MiB"; test "$rss" -le $((15*1024))

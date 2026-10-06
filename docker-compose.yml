@@ -1,0 +1,27 @@
+services:
+  docvision-llm-ws:
+    image: ghcr.io/mardix/docvision-llm-ws:latest
+    container_name: docvision-llm-ws
+    restart: unless-stopped
+    environment:
+      # Required: access token (at least 16 characters).
+      DOCVISION_TOKEN: ${DOCVISION_TOKEN:?set DOCVISION_TOKEN}
+      # Default LLM for PDFs, images, titles, summaries and extraction.
+      # openai, gemini, or any name for an OpenAI-compatible API (then set DOCVISION_LLM_BASE_URL).
+      DOCVISION_LLM_PROVIDER: ${DOCVISION_LLM_PROVIDER:-openai}
+      DOCVISION_LLM_MODEL: ${DOCVISION_LLM_MODEL:-}
+      DOCVISION_LLM_API_KEY: ${DOCVISION_LLM_API_KEY:-}
+      DOCVISION_LLM_BASE_URL: ${DOCVISION_LLM_BASE_URL:-}
+    ports:
+      - "4242:4242"
+    volumes:
+      - docvision-data:/data
+      # Documents the service may read by path, e.g. "source": "/documents/report.pdf"
+      # - ./documents:/documents:ro
+    read_only: true
+    # Conversions stay within 60% of this limit.
+    mem_limit: 512M
+    cpus: 1.0
+
+volumes:
+  docvision-data:
