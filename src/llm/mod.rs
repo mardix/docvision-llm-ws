@@ -385,10 +385,10 @@ impl Accounting {
     }
 
     pub fn record(&self, rec: CallRecord, started: Instant, ended: Instant) {
-        if let Some(w) = &self.writer {
-            if let Ok(record) = serde_json::to_string(&rec) {
-                w.send(WriteOp::Call { call_id: rec.call_id.clone(), request_id: self.request_id.clone(), record, at: now_ms() });
-            }
+        if let Some(w) = &self.writer
+            && let Ok(record) = serde_json::to_string(&rec)
+        {
+            w.send(WriteOp::Call { call_id: rec.call_id.clone(), request_id: self.request_id.clone(), record, at: now_ms() });
         }
         self.intervals.lock().unwrap().push((started, ended));
         self.calls.lock().unwrap().push(rec);

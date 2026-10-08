@@ -153,21 +153,34 @@ On failure, `ok` is `false` and the error looks like `{"code": "…", "message":
 | Field | Description |
 | --- | --- |
 | `source` | **Required.** Absolute path, `file:///…`, `https://…`, or `s3://bucket/key` |
-| `destination` | Async only. A `.md` path or S3 key (details below) |
+| `destination` | Async only. A folder (ending in `/`) or a `.md` path, local or S3 (details below) |
 | `metadata` | Any object. Returned in results and webhooks |
 | `requester_id` | Who is asking: a name or ID, up to 128 characters. Default `unknown`. Used to filter history and in `stats` (also accepted by `summarize`, `chunk` and `extract`) |
 | `webhook` | Async only. One webhook or an array of them. See [Webhooks](#webhooks) |
 
 **Sources:** `https://` always works. `http://` is accepted only for `localhost`/`127.0.0.1`. Redirects must stay on HTTPS.
 
-**Destination:** the Markdown goes to the `.md` you give. The full JSON result is written next to it, named `<name>.docv.json`:
+**Destination:** two files are written, the Markdown and the full JSON result.
 
-```
-/out/report.md            ← markdown
-/out/report.docv.json    ← full result
-```
+- **A folder** (ending in `/`): both are named after the source file, keeping its extension, so documents with the same name but different formats never collide.
 
-Existing files are not replaced unless `overwrite: true`. Otherwise the job fails with `409 destination_exists`.
+  ```
+  "destination": "s3://bucket/out/"      source: …/hello.pdf
+
+  s3://bucket/out/hello.pdf.md           ← markdown
+  s3://bucket/out/hello.pdf.docv.json    ← full result
+  ```
+
+- **A `.md` file:** the Markdown goes there, and the JSON is written next to it as `<name>.docv.json`.
+
+  ```
+  "destination": "/out/report.md"
+
+  /out/report.md            ← markdown
+  /out/report.docv.json     ← full result
+  ```
+
+Existing files are replaced. Set `overwrite: false` to keep them instead; the job then fails with `409 destination_exists`.
 
 **Response:** async returns `202` with this `data`. Sync returns `200` with the full [result](#result).
 
@@ -195,7 +208,7 @@ All options are optional, and all are top-level keys in `options`.
 | `priority` | `normal` | `normal`, `low` (async only) |
 | `cache` | `use` | `use`, `bypass`, `refresh` |
 | `allow_partial` | `false` | Accept partial extraction (`status: "partial"`) |
-| `overwrite` | `false` | Replace existing destination files |
+| `overwrite` | `true` | Replace existing destination files. `false` fails the job with `409 destination_exists` instead |
 
 **PDF and images**
 
@@ -697,7 +710,7 @@ Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_i
 The access token grants full use of the service, so treat it like a password and give it only to trusted callers. With it, a caller can:
 
 - **Read local files** the service can read (by absolute path). `/proc`, `/sys` and `/dev` are always refused, after symlinks are resolved, so the process environment and its secrets can't be read. In Docker the service sees only its image and what you mount; mount document folders read-only.
-- **Write destinations** (`.md` plus `.docv.json`) anywhere the service can write, never replacing existing files unless `overwrite: true`. In Docker, that's `/data` and any writable mounts.
+- **Write destinations** (`.md` plus `.docv.json`) anywhere the service can write, replacing existing files of those names unless `overwrite: false`. In Docker, that's `/data` and any writable mounts.
 - **Fetch URLs** over `https://` (and `http://` on localhost only), including hosts on your internal network. Webhooks follow the same rule. Run the service where it can only reach what it should.
 
 What the service guarantees:

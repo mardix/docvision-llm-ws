@@ -164,12 +164,11 @@ pub fn memory_limit() -> u64 {
     if let Some(v) = read("/sys/fs/cgroup/memory/memory.limit_in_bytes").filter(|v| *v < (1 << 60)) {
         return v;
     }
-    if let Ok(m) = std::fs::read_to_string("/proc/meminfo") {
-        if let Some(kb) =
+    if let Ok(m) = std::fs::read_to_string("/proc/meminfo")
+        && let Some(kb) =
             m.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok())
-        {
-            return kb * 1024;
-        }
+    {
+        return kb * 1024;
     }
     1 << 30
 }

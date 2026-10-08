@@ -308,11 +308,34 @@ pub enum Dest {
     S3(crate::source::S3Loc, String),
 }
 
-pub fn parse_dest(s: &str) -> Result<Dest, AppError> {
+/// A destination is a `.md` file, or a folder (ending in `/`) where the outputs are named after
+/// the source file: `hello.pdf` -> `hello.pdf.md` and `hello.pdf.docv.json`.
+pub fn parse_dest(s: &str, source: &str) -> Result<Dest, AppError> {
     let bad = |m: &str| AppError::bad_request("invalid_destination", m.to_string());
+    let (loc, query) = if s.starts_with("s3://") { s.split_once('?').map_or((s, None), |(a, q)| (a, Some(q))) } else { (s, None) };
+    let in_folder;
+    let s = if loc.ends_with('/') {
+        let name = crate::source::file_name(source);
+        let name = name.trim();
+        let name = if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) { "document" } else { name };
+        // S3 locations are URLs: the name is percent-encoded so `#`, `?`, `%` or spaces survive.
+        let name = if loc.starts_with("s3://") {
+            const KEY: &percent_encoding::AsciiSet =
+                &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
+            percent_encoding::utf8_percent_encode(name, KEY).to_string()
+        } else {
+            name.to_string()
+        };
+        in_folder = format!("{loc}{name}.md{}", query.map(|q| format!("?{q}")).unwrap_or_default());
+        in_folder.as_str()
+    } else {
+        s
+    };
     let key_or_path = if s.starts_with("s3://") { s.split('?').next().unwrap_or(s) } else { s };
     if !key_or_path.ends_with(".md") || key_or_path.ends_with("/.md") {
-        return Err(bad("destination must name a .md file (the JSON result is written next to it as <name>.docv.json)"));
+        return Err(bad(
+            "destination must be a folder ending in / or name a .md file (the JSON result is written next to it as <name>.docv.json)",
+        ));
     }
     if s.starts_with('/') {
         return Ok(Dest::Local(PathBuf::from(s)));
@@ -495,10 +518,21 @@ mod tests {
         assert_eq!(json_sibling("/x/a.md"), "/x/a.docv.json");
         #[cfg(feature = "s3")]
         {
-            let d = parse_dest("s3://b/k/report.md?region=eu-west-1").unwrap();
+            let d = parse_dest("s3://b/k/report.md?region=eu-west-1", "/in/x.pdf").unwrap();
             assert_eq!(d.json_display(), "s3://b/k/report.docv.json?region=eu-west-1");
         }
-        assert!(parse_dest("/x/a.txt").is_err());
-        assert!(parse_dest("/x/a.json").is_err());
+        assert!(parse_dest("/x/a.txt", "/in/x.pdf").is_err());
+        assert!(parse_dest("/x/a.json", "/in/x.pdf").is_err());
+        // Folders: outputs are named after the source file, extension kept.
+        let d = parse_dest("/out/", "/in/hello.pdf").unwrap();
+        assert_eq!((d.display(), d.json_display()), ("/out/hello.pdf.md".into(), "/out/hello.pdf.docv.json".into()));
+        assert_eq!(parse_dest("/out/", "https://x.com/files/Q3%20report.docx?sig=1").unwrap().display(), "/out/Q3 report.docx.md");
+        assert_eq!(parse_dest("/out/", "https://x.com/").unwrap().display(), "/out/document.md");
+        #[cfg(feature = "s3")]
+        {
+            let d = parse_dest("s3://b/out/?region=eu-west-1", "s3://in/a b.pdf").unwrap();
+            assert_eq!(d.display(), "s3://b/out/a%20b.pdf.md?region=eu-west-1");
+            assert_eq!(d.json_display(), "s3://b/out/a%20b.pdf.docv.json?region=eu-west-1");
+        }
     }
 }

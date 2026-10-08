@@ -56,10 +56,10 @@ fn validate_at(v: &Value, schema: &Value, path: &str) -> Result<(), String> {
     if !types.is_empty() && !types.iter().any(|t| type_matches(v, t)) {
         return Err(format!("{path} should be {}", types.join(" or ")));
     }
-    if let Some(options) = schema.get("enum").and_then(Value::as_array) {
-        if !options.contains(v) {
-            return Err(format!("{path} is not one of the allowed values"));
-        }
+    if let Some(options) = schema.get("enum").and_then(Value::as_array)
+        && !options.contains(v)
+    {
+        return Err(format!("{path} is not one of the allowed values"));
     }
     if let Value::Object(obj) = v {
         for key in schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {

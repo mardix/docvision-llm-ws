@@ -400,10 +400,10 @@ fn split_pdf(src: &std::path::Path, first: u32, ranges: &[(u32, u32)], dir: &std
             let Some(id) = cur else { break };
             let Ok(d) = doc.get_dictionary(id) else { break };
             for k in [b"Resources".as_slice(), b"MediaBox", b"CropBox", b"Rotate"] {
-                if !out.iter().any(|(x, _)| *x == k) {
-                    if let Ok(v) = d.get(k) {
-                        out.push((k, v.clone()));
-                    }
+                if !out.iter().any(|(x, _)| *x == k)
+                    && let Ok(v) = d.get(k)
+                {
+                    out.push((k, v.clone()));
                 }
             }
             cur = d.get(b"Parent").and_then(Object::as_reference).ok();

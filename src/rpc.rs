@@ -377,7 +377,7 @@ impl Default for Options {
             language_method: Method::Local,
             translate_to: None,
             words_per_page: 500,
-            overwrite: false,
+            overwrite: true,
             llm_provider: None,
             llm_model: None,
             llm_base_url: None,
@@ -423,10 +423,10 @@ impl Options {
         if self.translate_to.is_some() && !cfg!(feature = "translate") {
             return Err(AppError::feature_not_compiled("translate"));
         }
-        if let Some(t) = &self.translate_to {
-            if t.is_empty() || t.len() > 35 || !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                return bad("translate_to must be a BCP-47 tag");
-            }
+        if let Some(t) = &self.translate_to
+            && (t.is_empty() || t.len() > 35 || !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        {
+            return bad("translate_to must be a BCP-47 tag");
         }
         if self.execution == Execution::Sync && self.priority == Priority::Low {
             return bad("priority is only valid with async execution");
@@ -434,10 +434,10 @@ impl Options {
         if let Some(s) = &self.extract_schema {
             crate::schema::check_schema(s).map_err(|m| AppError::bad_request("invalid_options", m))?;
         }
-        if let Some(u) = &self.llm_base_url {
-            if !(u.starts_with("https://") || u.starts_with("http://")) {
-                return bad("llm_base_url must be an http(s) URL");
-            }
+        if let Some(u) = &self.llm_base_url
+            && !(u.starts_with("https://") || u.starts_with("http://"))
+        {
+            return bad("llm_base_url must be an http(s) URL");
         }
         Ok(())
     }

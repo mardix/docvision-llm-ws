@@ -198,12 +198,11 @@ impl Ctx<'_, '_> {
             "head" => {
                 if let Some(t) =
                     tag.find_node(self.parser, &mut |n| n.as_tag().is_some_and(|t| t.name().as_utf8_str().eq_ignore_ascii_case("title")))
+                    && let Some(Node::Tag(tt)) = t.get(self.parser)
                 {
-                    if let Some(Node::Tag(tt)) = t.get(self.parser) {
-                        let s = decode_entities(tt.inner_text(self.parser).trim());
-                        if !s.is_empty() {
-                            self.title = Some(s);
-                        }
+                    let s = decode_entities(tt.inner_text(self.parser).trim());
+                    if !s.is_empty() {
+                        self.title = Some(s);
                     }
                 }
             }

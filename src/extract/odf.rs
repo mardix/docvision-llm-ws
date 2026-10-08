@@ -143,11 +143,11 @@ pub fn extract(path: &Path, format: Format, limits: &Limits) -> XResult<Extracte
                         }
                     }
                     b"table-cell" | b"covered-table-cell" => {
-                        if let Some(t) = tables.last_mut() {
-                            if let (Some((c, rep)), Some(row)) = (t.1.take(), t.0.last_mut()) {
-                                let n = if c.is_empty() { rep } else { rep.min(MAX_REPEAT) };
-                                row.extend(std::iter::repeat_n(c, n));
-                            }
+                        if let Some(t) = tables.last_mut()
+                            && let (Some((c, rep)), Some(row)) = (t.1.take(), t.0.last_mut())
+                        {
+                            let n = if c.is_empty() { rep } else { rep.min(MAX_REPEAT) };
+                            row.extend(std::iter::repeat_n(c, n));
                         }
                     }
                     b"table-row" => {

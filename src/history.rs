@@ -125,10 +125,10 @@ pub async fn list(app: &Arc<App>, ctx: &ReqCtx, payload: Value) -> Result<axum::
     if !(1..=100).contains(&limit) {
         return Err(AppError::bad_request("invalid_payload", "limit must be between 1 and 100"));
     }
-    if let Some(e) = &p.execution {
-        if !matches!(e.as_str(), "sync" | "async") {
-            return Err(AppError::bad_request("invalid_payload", "execution must be sync or async"));
-        }
+    if let Some(e) = &p.execution
+        && !matches!(e.as_str(), "sync" | "async")
+    {
+        return Err(AppError::bad_request("invalid_payload", "execution must be sync or async"));
     }
     let f = HistoryFilter {
         operation: p.operation.clone(),

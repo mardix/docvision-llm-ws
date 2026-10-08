@@ -190,22 +190,20 @@ fn split(content: &str, target_tokens: u32, segments: &[Segment]) -> (TextStats,
         let t = text.trim_start();
         let fence = t.starts_with("```") || t.starts_with("~~~");
         let mut is_heading = false;
-        if !in_fence {
-            if let Some((level, title)) = heading_level(text) {
-                is_heading = true;
-                while headings.last().is_some_and(|(l, _)| *l >= level) {
-                    headings.pop();
-                }
-                headings.push((level, title.to_string()));
-                let ctx: Vec<String> = headings.iter().map(|(_, h)| h.clone()).collect();
-                // A heading starts a new chunk, unless the open chunk is only headings so far
-                // (e.g. "## 2 Section" directly followed by "### 2.1 Part"): those stay together.
-                if chunk_has_body {
-                    close(&mut chunk_start, line_start, &mut chunk_chars, &mut chunk_headings, ctx);
-                    chunk_has_body = false;
-                } else {
-                    chunk_headings = ctx;
-                }
+        if !in_fence && let Some((level, title)) = heading_level(text) {
+            is_heading = true;
+            while headings.last().is_some_and(|(l, _)| *l >= level) {
+                headings.pop();
+            }
+            headings.push((level, title.to_string()));
+            let ctx: Vec<String> = headings.iter().map(|(_, h)| h.clone()).collect();
+            // A heading starts a new chunk, unless the open chunk is only headings so far
+            // (e.g. "## 2 Section" directly followed by "### 2.1 Part"): those stay together.
+            if chunk_has_body {
+                close(&mut chunk_start, line_start, &mut chunk_chars, &mut chunk_headings, ctx);
+                chunk_has_body = false;
+            } else {
+                chunk_headings = ctx;
             }
         }
         if fence {

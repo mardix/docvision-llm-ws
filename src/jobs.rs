@@ -271,7 +271,7 @@ pub async fn convert(app: &Arc<App>, ctx: &ReqCtx, payload: Value, options: Valu
         return Err(AppError::bad_request("invalid_options", "destinations and webhooks require async execution"));
     }
     if let Some(d) = &payload.destination {
-        result::parse_dest(d)?;
+        result::parse_dest(d, &payload.source)?;
     }
     if payload.webhooks().len() > crate::webhook::MAX_WEBHOOKS {
         return Err(AppError::bad_request("invalid_webhook", format!("at most {} webhooks", crate::webhook::MAX_WEBHOOKS)));
@@ -321,12 +321,11 @@ async fn accept_async(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Sou
     let job_id = uuid::Uuid::now_v7().to_string();
 
     // Cheap pre-check for local sources: a cache hit completes immediately.
-    if spec.options.cache == CacheMode::Use {
-        if let Source::Local(_) = &src {
-            if let Some(resp) = async_cache_hit(app, ctx, &spec, &src, &job_id).await? {
-                return Ok(resp);
-            }
-        }
+    if spec.options.cache == CacheMode::Use
+        && let Source::Local(_) = &src
+        && let Some(resp) = async_cache_hit(app, ctx, &spec, &src, &job_id).await?
+    {
+        return Ok(resp);
     }
 
     let stored = StoredJob {
@@ -486,12 +485,11 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
     let res = async {
         let mut mem = app.admission.reserve(app.admission.estimate(hint, None), false).await?;
         let needs = needs_llm_extract(&spec, None);
-        if needs {
-            if let Some(ep) = endpoint(app, &spec.options, false)? {
-                if app.gateway.lane(&ep).state() == "open" {
-                    return Err(AppError::new(503, "provider_unavailable", "provider circuit breaker is open").retry_after(30));
-                }
-            }
+        if needs
+            && let Some(ep) = endpoint(app, &spec.options, false)?
+            && app.gateway.lane(&ep).state() == "open"
+        {
+            return Err(AppError::new(503, "provider_unavailable", "provider circuit breaker is open").retry_after(30));
         }
         pipeline(app, &spec, &src, Prio::Sync, Prio::Sync, &mut mem, acct.clone(), false).await
     }
@@ -854,7 +852,7 @@ async fn finalize_async(
     started: Instant,
 ) -> &'static str {
     let job_id = spec.job_id.clone().unwrap_or_default();
-    let dest = spec.payload.destination.as_deref().and_then(|d| result::parse_dest(d).ok());
+    let dest = spec.payload.destination.as_deref().and_then(|d| result::parse_dest(d, &spec.payload.source).ok());
     let path = app.results_dir().join(format!("{job_id}.json"));
     let src_shown = source::sanitize(&spec.payload.source);
     let (mut status, body, mut err, fetch_ms, cache_hit, leader, key) = match res {
@@ -942,15 +940,14 @@ async fn finalize_async(
         }
         out
     };
-    if let (Ok(_), Some(d)) = (&written, &dest) {
-        if err.is_none() {
-            if let Err(e) = result::publish(d, &path, md.as_deref().unwrap_or(""), spec.options.overwrite).await {
-                // Never claim a destination was written when storage failed.
-                status = "failed";
-                written = write(status, Vec::new(), Some(&e)).await;
-                err = Some(e);
-            }
-        }
+    if let (Ok(_), Some(d)) = (&written, &dest)
+        && err.is_none()
+        && let Err(e) = result::publish(d, &path, md.as_deref().unwrap_or(""), spec.options.overwrite).await
+    {
+        // Never claim a destination was written when storage failed.
+        status = "failed";
+        written = write(status, Vec::new(), Some(&e)).await;
+        err = Some(e);
     }
     if let Err(e) = &written {
         status = "failed";
@@ -958,17 +955,19 @@ async fn finalize_async(
         let _ = write(status, Vec::new(), Some(e)).await;
     }
     let ((bs, be, size), timing) = written.unwrap_or(((0, 0, 0), Timing::default()));
-    if status != "failed" && leader && spec.options.cache != CacheMode::Bypass {
-        if let Some(k) = &key {
-            app.writer.send(WriteOp::CachePut {
-                key: k.clone(),
-                path: path.display().to_string(),
-                body_start: bs as i64,
-                body_end: be as i64,
-                size: size as i64,
-                at: now_ms(),
-            });
-        }
+    if status != "failed"
+        && leader
+        && spec.options.cache != CacheMode::Bypass
+        && let Some(k) = &key
+    {
+        app.writer.send(WriteOp::CachePut {
+            key: k.clone(),
+            path: path.display().to_string(),
+            body_start: bs as i64,
+            body_end: be as i64,
+            size: size as i64,
+            at: now_ms(),
+        });
     }
     let stats = body.as_ref().map(|b| b.fields(&["statistics", "warnings", "format"])).unwrap_or_default();
     let error_json = err.as_ref().map(|e| serde_json::to_string(&e.body()).unwrap_or_default());

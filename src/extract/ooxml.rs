@@ -38,10 +38,10 @@ fn docx_styles(pkg: &mut Package) -> XResult<DocxStyles> {
                                 }
                             }
                             b"outlineLvl" => {
-                                if let Some(l) = attr(&e, b"val").and_then(|v| v.parse::<usize>().ok()) {
-                                    if l < 9 {
-                                        heading.insert(id.clone(), (l + 1).min(6));
-                                    }
+                                if let Some(l) = attr(&e, b"val").and_then(|v| v.parse::<usize>().ok())
+                                    && l < 9
+                                {
+                                    heading.insert(id.clone(), (l + 1).min(6));
                                 }
                             }
                             _ => {}
@@ -153,10 +153,10 @@ pub fn docx(path: &Path, limits: &Limits) -> XResult<Extracted> {
                             }
                         }
                         b"outlineLvl" => {
-                            if let (Some(p), Some(v)) = (para.as_mut(), attr(e, b"val").and_then(|v| v.parse::<usize>().ok())) {
-                                if v < 9 {
-                                    p.outline = Some((v + 1).min(6));
-                                }
+                            if let (Some(p), Some(v)) = (para.as_mut(), attr(e, b"val").and_then(|v| v.parse::<usize>().ok()))
+                                && v < 9
+                            {
+                                p.outline = Some((v + 1).min(6));
                             }
                         }
                         b"ilvl" => {
@@ -275,10 +275,10 @@ pub fn docx(path: &Path, limits: &Limits) -> XResult<Extracted> {
                         }
                     }
                     b"tc" => {
-                        if let Some(t) = tables.last_mut() {
-                            if let (Some(c), Some(row)) = (t.cell.take(), t.rows.last_mut()) {
-                                row.push(c);
-                            }
+                        if let Some(t) = tables.last_mut()
+                            && let (Some(c), Some(row)) = (t.cell.take(), t.rows.last_mut())
+                        {
+                            row.push(c);
                         }
                     }
                     b"tbl" => {
@@ -486,22 +486,20 @@ pub fn xlsx(path: &Path, limits: &Limits) -> XResult<Extracted> {
                             }
                             col += 1;
                         }
-                        b"row" => {
-                            if row.iter().any(|c| !c.trim().is_empty()) {
-                                while row.last().is_some_and(|c| c.trim().is_empty()) {
-                                    row.pop();
-                                }
-                                match cols {
-                                    Some(n) => {
-                                        write_row(&mut out, &row, n);
-                                        if !wrote_header {
-                                            write_separator(&mut out, n.max(row.len()));
-                                            wrote_header = true;
-                                        }
-                                        row.clear();
+                        b"row" if row.iter().any(|c| !c.trim().is_empty()) => {
+                            while row.last().is_some_and(|c| c.trim().is_empty()) {
+                                row.pop();
+                            }
+                            match cols {
+                                Some(n) => {
+                                    write_row(&mut out, &row, n);
+                                    if !wrote_header {
+                                        write_separator(&mut out, n.max(row.len()));
+                                        wrote_header = true;
                                     }
-                                    None => rows.push(std::mem::take(&mut row)),
+                                    row.clear();
                                 }
+                                None => rows.push(std::mem::take(&mut row)),
                             }
                         }
                         _ => {}

@@ -68,10 +68,10 @@ impl From<ExtractError> for crate::rpc::AppError {
 impl From<quick_xml::Error> for ExtractError {
     fn from(e: quick_xml::Error) -> Self {
         // A zip-bomb limit surfaces as an I/O error from inside the XML reader.
-        if let quick_xml::Error::Io(io) = &e {
-            if io.kind() == std::io::ErrorKind::FileTooLarge {
-                return ExtractError::TooLarge(io.to_string());
-            }
+        if let quick_xml::Error::Io(io) = &e
+            && io.kind() == std::io::ErrorKind::FileTooLarge
+        {
+            return ExtractError::TooLarge(io.to_string());
         }
         ExtractError::Corrupt(format!("malformed XML: {e}"))
     }

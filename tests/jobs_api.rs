@@ -315,12 +315,29 @@ async fn destinations_local_with_markdown() {
     assert_eq!(published["dest_file"].as_str().map(|d| d.ends_with("report.md")), Some(true), "{published}");
     assert_eq!(files[0]["bytes"].as_u64().unwrap(), json_bytes.len() as u64, "self-referential size is exact");
     assert_eq!(files[1]["bytes"].as_u64().unwrap(), md.len() as u64);
-    // overwrite=false on an existing destination fails, and does not claim the write.
+    // Existing files are replaced by default.
     let (_, v) = s
         .rpc(
             "convert",
             json!({"source": p, "destination": dest.to_str().unwrap()}),
             json!({"cache": "bypass", "title_method": "local", "summary_method": "local"}),
+        )
+        .await;
+    let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
+    assert_eq!(j["status"], "completed", "{j}");
+    // A folder destination names the outputs after the source file, extension kept.
+    let folder = format!("{}/", out.display());
+    let (_, v) =
+        s.rpc("convert", json!({"source": p, "destination": folder}), json!({"title_method": "local", "summary_method": "local"})).await;
+    let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
+    assert_eq!(j["status"], "completed", "{j}");
+    assert!(out.join("d.docx.md").exists() && out.join("d.docx.docv.json").exists());
+    // overwrite=false on an existing destination fails, and does not claim the write.
+    let (_, v) = s
+        .rpc(
+            "convert",
+            json!({"source": p, "destination": dest.to_str().unwrap()}),
+            json!({"cache": "bypass", "overwrite": false, "title_method": "local", "summary_method": "local"}),
         )
         .await;
     let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
