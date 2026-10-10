@@ -140,6 +140,13 @@ async fn native_formats_sync() {
     assert!(d["dest_file"].is_null() && d["md_file"].is_null() && d["docv_file"].is_null() && d["docv_bytes"].is_null());
     assert_eq!(d["src_bytes"].as_u64().unwrap(), std::fs::metadata(&p).unwrap().len(), "the original's size");
     assert_eq!(d["md_bytes"].as_u64().unwrap(), d["content"].as_str().unwrap().len() as u64);
+    // History records the sizes for sync requests too; nothing was written, so no paths.
+    s.flush().await;
+    let (_, h) = s.rpc("history.get", json!({"request_id": v["request_id"]}), json!({})).await;
+    let q = &h["data"]["request"];
+    assert_eq!(q["src_bytes"], d["src_bytes"], "{q}");
+    assert_eq!(q["md_bytes"], d["md_bytes"]);
+    assert!(q["md_file"].is_null() && q["docv_file"].is_null() && q["dest_file"].is_null());
     assert_eq!(d["llm"]["totals"]["calls"], 0);
     assert!(d["statistics"]["total_words"].as_u64().unwrap() > 100);
     assert!(d["statistics"]["original_total_pages"].is_null());

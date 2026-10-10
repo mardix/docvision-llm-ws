@@ -338,6 +338,17 @@ async fn destinations_local_with_markdown() {
     assert!(r["md_file"].as_str().unwrap().ends_with("/out/d.docx.md"), "{r}");
     assert!(r["docv_file"].as_str().unwrap().ends_with("/out/d.docx.docv.json"));
     assert!(r["src_file"].as_str().unwrap().ends_with("d.docx"));
+    // History keeps the same paths and sizes (shown by the dashboard), outside `statistics`.
+    s.flush().await;
+    let (_, h) = s.rpc("history.get", json!({"request_id": j["request_id"]}), json!({})).await;
+    let q = &h["data"]["request"];
+    assert_eq!(q["dest_file"], folder.as_str(), "{q}");
+    assert_eq!(q["md_file"], r["md_file"]);
+    assert_eq!(q["docv_file"], r["docv_file"]);
+    assert_eq!(q["md_bytes"], r["md_bytes"]);
+    assert_eq!(q["src_bytes"], r["src_bytes"]);
+    assert_eq!(q["docv_bytes"].as_u64().unwrap(), std::fs::metadata(out.join("d.docx.docv.json")).unwrap().len());
+    assert!(q["statistics"].get("files").is_none() && q["statistics"]["total_words"].as_u64().unwrap() > 0);
     // overwrite=false on an existing destination fails, and does not claim the write.
     let (_, v) = s
         .rpc(

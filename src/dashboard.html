@@ -110,7 +110,7 @@
   tbody tr.click { cursor: pointer; }
   tbody tr.click:hover td { background: #f6f8fb; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  td.src { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  td.src { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
   td.wrap { white-space: normal; min-width: 240px; }
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 550; background: var(--soft); color: var(--muted); }
   .pill.ok { background: var(--ok-soft); color: var(--ok); }
@@ -396,6 +396,16 @@
   const model = (i) => i.llm_model ? el("span", { class: "tag", title: (i.llm_provider || "") + " / " + i.llm_model }, i.llm_model) : el("span", { class: "muted" }, "—");
   const requester = (r) => el("span", { class: "tag" }, r || "unknown");
   const fmt = (f) => f ? el("span", { class: "fmt" }, f) : el("span", { class: "muted" }, "—");
+  const bytes = (n) => {
+    if (n === null || n === undefined) return "—";
+    if (n < 1024) return n + " B";
+    const units = ["KB", "MB", "GB", "TB"];
+    let v = n / 1024, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + " " + units[i];
+  };
+  // A stored path with its size, or a dash when the file was not written.
+  const fileLine = (path, size) => path ? path + (size != null ? "  ·  " + bytes(size) : "") : "—";
   const tokens = (u) => u && (u.input_tokens || u.output_tokens) ? num((u.input_tokens || 0) + (u.output_tokens || 0)) : "—";
   const kpi = (label, value, sub, cls, meter) => el("div", { class: "card kpi" },
     el("div", { class: "label" }, label), el("div", { class: "value " + (cls || "") }, value),
@@ -522,7 +532,7 @@
     $("failCount").className = "count" + (failed ? " bad" : "");
   }
 
-  const REQ_HEAD = [["When"], ["Requester"], ["Operation"], ["Format"], ["Source"], ["Model"], ["Status"], ["Duration", "num"], ["Pages", "num"], ["Tokens", "num"]];
+  const REQ_HEAD = [["When"], ["Requester"], ["Operation"], ["Format"], ["Source"], ["Size", "num"], ["Markdown", "num"], ["Model"], ["Status"], ["Duration", "num"], ["Pages", "num"], ["Tokens", "num"]];
   function renderRecent(items) {
     table($("recent"), REQ_HEAD, items.map((i) => ({
       raw: i,
@@ -530,7 +540,7 @@
         [ago(i.created_at)], [requester(i.requester_id)],
         [i.operation + (i.execution ? " · " + i.execution : "")],
         [fmt(i.format || (i.statistics && i.statistics.format))],
-        [i.source || "—", "src"], [model(i)], [pill(shownStatus(i))],
+        [i.source || "—", "src"], [bytes(i.src_bytes), "num"], [bytes(i.md_bytes), "num"], [model(i)], [pill(shownStatus(i))],
         [ms(i.timings && i.timings.total_ms), "num"],
         [i.statistics && i.statistics.original_total_pages != null ? num(i.statistics.original_total_pages) : "—", "num"],
         [tokens(i.usage), "num"],
@@ -610,7 +620,10 @@
         el("dl", {},
           el("dt", {}, "Requester"), el("dd", {}, q.requester_id || "unknown"),
           el("dt", {}, "Provider / model"), el("dd", {}, llm),
-          el("dt", {}, "Source"), el("dd", {}, q.source || "—"),
+          el("dt", {}, "Source"), el("dd", {}, fileLine(q.source, q.src_bytes)),
+          el("dt", {}, "Destination"), el("dd", {}, q.dest_file || "—"),
+          el("dt", {}, "Markdown file"), el("dd", {}, q.md_file ? fileLine(q.md_file, q.md_bytes) : (q.md_bytes != null ? "not written  ·  " + bytes(q.md_bytes) : "—")),
+          el("dt", {}, "JSON file"), el("dd", {}, fileLine(q.docv_file, q.docv_bytes)),
           el("dt", {}, "Format"), el("dd", {}, q.format || st.format || "—"),
           el("dt", {}, "Created"), el("dd", {}, q.created_at ? new Date(q.created_at).toLocaleString() : "—"),
           el("dt", {}, "Duration"), el("dd", {}, ms(q.timings && q.timings.total_ms)),
@@ -706,6 +719,8 @@
     const facts = el("div", { class: "facts" });
     const fact = (k, v) => facts.append(el("span", {}, k + " ", el("b", {}, v)));
     if (data.format) fact("Format", data.format);
+    if (data.src_bytes != null) fact("Source", bytes(data.src_bytes));
+    if (data.md_bytes != null) fact("Markdown", bytes(data.md_bytes));
     if (data.statistics) {
       fact("Words", num(data.statistics.total_words));
       if (data.statistics.original_total_pages != null) fact("Pages", num(data.statistics.original_total_pages));
@@ -716,6 +731,11 @@
     if (data.timing) fact("Time", ms(data.timing.total_ms));
     if (data.cache_hit) fact("Cache", "hit");
     if (facts.childNodes.length) parts.push(facts);
+    if (data.md_file || data.docv_file) {
+      parts.push(el("dl", { style: "margin-top:12px" },
+        el("dt", {}, "Markdown file"), el("dd", {}, fileLine(data.md_file, data.md_bytes)),
+        el("dt", {}, "JSON file"), el("dd", {}, fileLine(data.docv_file, data.docv_bytes))));
+    }
     if (data.warnings && data.warnings.length) parts.push(el("div", { class: "hint warn", style: "margin-top:8px" }, "Warnings: " + data.warnings.join(" · ")));
     if (data.error) parts.push(el("div", { class: "error", style: "margin-top:8px" }, (data.error.code || "error") + ": " + (data.error.message || "")));
 

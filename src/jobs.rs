@@ -556,7 +556,7 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
             http_status: Some(http as i64),
             finished_at: now_ms(),
             timings: serde_json::to_string(&timing).ok(),
-            statistics: stats_with_format(&stats),
+            statistics: stats_with_format(&stats, serde_json::json!({"src_bytes": src_bytes, "md_bytes": md_bytes(body.as_ref())})),
             format: stats.get("format").and_then(Value::as_str).map(str::to_string),
             usage: serde_json::to_string(&llm.totals).ok(),
             warnings: stats.get("warnings").map(Value::to_string),
@@ -617,10 +617,15 @@ fn stage_events(request_id: &str, t: &Timing, status: &str, err: Option<&AppErro
 }
 
 /// Stored statistics plus the detected format (used by the `stats` operation).
-fn stats_with_format(fields: &serde_json::Map<String, Value>) -> Option<String> {
+/// Statistics as stored in history: the result's statistics plus the detected format and the
+/// file paths and sizes (`files`), so history can show them after the result itself expires.
+fn stats_with_format(fields: &serde_json::Map<String, Value>, files: Value) -> Option<String> {
     let mut s = fields.get("statistics")?.clone();
-    if let (Some(o), Some(f)) = (s.as_object_mut(), fields.get("format")) {
-        o.insert("format".into(), f.clone());
+    if let Some(o) = s.as_object_mut() {
+        if let Some(f) = fields.get("format") {
+            o.insert("format".into(), f.clone());
+        }
+        o.insert("files".into(), files);
     }
     Some(s.to_string())
 }
@@ -998,6 +1003,15 @@ async fn finalize_async(
         });
     }
     let stats = body.as_ref().map(|b| b.fields(&["statistics", "warnings", "format"])).unwrap_or_default();
+    let published = dest.as_ref().filter(|_| err.is_none());
+    let files = serde_json::json!({
+        "src_bytes": src_bytes,
+        "dest_file": spec.payload.destination.as_deref().map(source::sanitize),
+        "md_file": published.map(|d| d.display()),
+        "md_bytes": md_size,
+        "docv_file": published.map(|d| d.json_display()),
+        "docv_bytes": published.map(|_| size),
+    });
     let error_json = err.as_ref().map(|e| serde_json::to_string(&e.body()).unwrap_or_default());
     // The terminal state is committed before it is announced (job.wait) or delivered (webhook).
     let terminal = vec![
@@ -1017,7 +1031,7 @@ async fn finalize_async(
             http_status: None,
             finished_at: now_ms(),
             timings: serde_json::to_string(&timing).ok(),
-            statistics: stats_with_format(&stats),
+            statistics: stats_with_format(&stats, files),
             format: stats.get("format").and_then(Value::as_str).map(str::to_string),
             usage: serde_json::to_string(&llm.totals).ok(),
             warnings: stats.get("warnings").map(Value::to_string),

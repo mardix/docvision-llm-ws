@@ -72,7 +72,7 @@ Requests can override any of these with the `llm_*` options.
 | Route | Auth | Purpose |
 | --- | --- | --- |
 | `POST /rpc` | token | All operations (below) |
-| `GET /_/dashboard` | token, entered in the page | Dashboard: live activity, in-progress requests, paginated request history and failures (filter by requester, operation, format, status), and forms to run `convert`, `summarize`, `chunk` and `extract` |
+| `GET /_/dashboard` | token, entered in the page | Dashboard: live activity, in-progress requests, paginated request history and failures (filter by requester, operation, format, status) with file paths and sizes, and forms to run `convert`, `summarize`, `chunk` and `extract` |
 | `GET /_/doc` | none | This README as a web page |
 | `GET /metrics` | token | Prometheus metrics |
 | `GET /livez` | none | `200 ok` while the process is up |
@@ -595,6 +595,7 @@ Waits for a state change (30 s at most). Returns the same data as `job.get` with
 - `in_progress: true` returns only requests that are `queued` or `running`.
 - `format` filters by detected document format (`pdf`, `docx`, `xlsx`, `pptx`, `html`, `markdown`, `text`, `png`, `jpeg`, `webp`, …).
 - Each item includes `requester_id`, `format`, `llm_provider` and `llm_model` (`null` when no LLM was used), status, timings, statistics and token usage.
+- Each item also carries the file fields of the result: `source`, `src_bytes`, `dest_file`, `md_file`, `md_bytes`, `docv_file` and `docv_bytes`. They stay in history after the result itself has expired.
 - Returns `{"items": [...], "has_more": true, "next_cursor": "…"}`.
 - Pass `next_cursor` back as `cursor` to get the next page.
 - History never stores tokens, credentials, document content or prompts.

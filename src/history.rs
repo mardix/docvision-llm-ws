@@ -83,6 +83,9 @@ fn item(r: &sqlx::any::AnyRow) -> Value {
     let s = |c: &str| r.try_get::<Option<String>, _>(c).ok().flatten();
     let i = |c: &str| r.try_get::<Option<i64>, _>(c).ok().flatten();
     let usage = json_col(r, "usage");
+    // File paths and sizes are stored with the statistics; they are shown as their own fields.
+    let mut statistics = json_col(r, "statistics");
+    let files = statistics.as_object_mut().and_then(|o| o.remove("files")).unwrap_or(Value::Null);
     serde_json::json!({
         "request_id": s("request_id"),
         "requester_id": s("requester_id"),
@@ -90,6 +93,12 @@ fn item(r: &sqlx::any::AnyRow) -> Value {
         "operation": s("operation"),
         "execution": s("mode"),
         "source": s("source"),
+        "src_bytes": files.get("src_bytes"),
+        "dest_file": files.get("dest_file"),
+        "md_file": files.get("md_file"),
+        "md_bytes": files.get("md_bytes"),
+        "docv_file": files.get("docv_file"),
+        "docv_bytes": files.get("docv_bytes"),
         "request_status": s("request_status"),
         "execution_status": s("execution_status"),
         "execution_stage": s("execution_stage"),
@@ -98,7 +107,7 @@ fn item(r: &sqlx::any::AnyRow) -> Value {
         "created_at": i("created_at").map(rfc3339),
         "finished_at": i("finished_at").map(rfc3339),
         "timings": json_col(r, "timings"),
-        "statistics": json_col(r, "statistics"),
+        "statistics": statistics,
         "llm_provider": usage.get("provider"),
         "llm_model": usage.get("model"),
         "usage": usage,
