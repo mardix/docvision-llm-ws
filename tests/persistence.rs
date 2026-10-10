@@ -254,6 +254,10 @@ async fn webhooks_sign_retry_and_dedupe() {
     assert_eq!(payload["status"], job["status"]);
     assert_eq!(payload["statistics"], job["result"]["statistics"]);
     assert!(payload.get("content").is_none(), "reference payloads carry no content");
+    // The event says where things are and how big, so the receiver can decide what to fetch.
+    assert_eq!(payload["src_file"], job["result"]["src_file"]);
+    assert!(payload["src_bytes"].as_u64().unwrap() > 0 && payload["md_bytes"].as_u64().unwrap() > 0, "{payload}");
+    assert!(payload["md_file"].is_null() && payload["docv_file"].is_null(), "no destination was requested");
     s.flush().await;
     let (_, g) = s.rpc("job.get", json!({"job_id": job_id, "fields": ["status"]}), json!({})).await;
     let wh = &g["data"]["webhooks"][0];

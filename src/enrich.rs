@@ -245,6 +245,16 @@ async fn call(cx: &Cx<'_>, purpose: &str, span: Option<String>, req: LlmRequest)
     }
 }
 
+/// The JSON object inside a model answer: providers without a JSON mode may wrap it in a
+/// ```json fence or add a sentence around it.
+fn json_text(s: &str) -> &str {
+    let t = s.trim();
+    match (t.find('{'), t.rfind('}')) {
+        (Some(a), Some(b)) if a < b => &t[a..=b],
+        _ => t,
+    }
+}
+
 /// Structured extraction: one call returning JSON for `schema`, validated, with one retry that
 /// tells the model what was wrong. Content beyond the model's input budget is cut (with a warning).
 async fn extract_structured(cx: &Cx<'_>, content: &str, schema: &Value) -> Result<(Value, Option<String>), String> {
@@ -270,7 +280,7 @@ async fn extract_structured(cx: &Cx<'_>, content: &str, schema: &Value) -> Resul
             schema: Some(schema.clone()),
         };
         let out = call(cx, "structured_extraction", Some(format!("attempt {attempt}")), req).await?;
-        let problem = match serde_json::from_str::<Value>(out.trim()) {
+        let problem = match serde_json::from_str::<Value>(json_text(&out)) {
             Ok(v) => match crate::schema::validate(&v, schema) {
                 Ok(()) => return Ok((v, note)),
                 Err(e) => e,
@@ -342,8 +352,7 @@ async fn combined(cx: &Cx<'_>, content: &str, title: bool, summary: bool, lang: 
         schema: None,
     };
     let out = call(cx, "title_summary_language", None, req).await?;
-    let json = out.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
-    serde_json::from_str::<Combined>(json).map_err(|_| "model did not return valid JSON".to_string())
+    serde_json::from_str::<Combined>(json_text(&out)).map_err(|_| "model did not return valid JSON".to_string())
 }
 
 pub struct Translation {

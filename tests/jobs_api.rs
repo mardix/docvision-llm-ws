@@ -308,13 +308,14 @@ async fn destinations_local_with_markdown() {
     let md = std::fs::read_to_string(&dest).unwrap();
     let published: Value = serde_json::from_slice(&json_bytes).unwrap();
     assert_eq!(published["content"].as_str().unwrap(), md);
-    let files = published["files"].as_array().unwrap();
-    assert_eq!(files[0]["kind"], "result_json");
-    assert!(files[0]["location"].as_str().unwrap().ends_with("report.docv.json"));
-    assert_eq!(files[1]["kind"], "markdown");
     assert_eq!(published["dest_file"].as_str().map(|d| d.ends_with("report.md")), Some(true), "{published}");
-    assert_eq!(files[0]["bytes"].as_u64().unwrap(), json_bytes.len() as u64, "self-referential size is exact");
-    assert_eq!(files[1]["bytes"].as_u64().unwrap(), md.len() as u64);
+    assert_eq!(published["md_file"], published["dest_file"], "a .md destination is where the Markdown goes");
+    assert!(published["docv_file"].as_str().unwrap().ends_with("report.docv.json"));
+    // Sizes sit next to the paths; the JSON's own size is exact even though it contains itself.
+    assert_eq!(published["docv_bytes"].as_u64().unwrap(), json_bytes.len() as u64, "self-referential size is exact");
+    assert_eq!(published["md_bytes"].as_u64().unwrap(), md.len() as u64);
+    assert_eq!(published["src_bytes"].as_u64().unwrap(), std::fs::metadata(&p).unwrap().len());
+    assert!(published.get("files").is_none(), "the files list was replaced by the *_file / *_bytes fields");
     // Existing files are replaced by default.
     let (_, v) = s
         .rpc(
@@ -332,6 +333,11 @@ async fn destinations_local_with_markdown() {
     let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
     assert_eq!(j["status"], "completed", "{j}");
     assert!(out.join("d.docx.md").exists() && out.join("d.docx.docv.json").exists());
+    let r = &j["result"];
+    assert_eq!(r["dest_file"], folder.as_str(), "the destination as requested");
+    assert!(r["md_file"].as_str().unwrap().ends_with("/out/d.docx.md"), "{r}");
+    assert!(r["docv_file"].as_str().unwrap().ends_with("/out/d.docx.docv.json"));
+    assert!(r["src_file"].as_str().unwrap().ends_with("d.docx"));
     // overwrite=false on an existing destination fails, and does not claim the write.
     let (_, v) = s
         .rpc(
@@ -343,7 +349,9 @@ async fn destinations_local_with_markdown() {
     let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
     assert_eq!(j["status"], "failed", "{j}");
     assert_eq!(j["error"]["code"], "destination_exists");
-    assert_eq!(j["result"]["files"], json!([]));
+    let r = &j["result"];
+    assert!(r["md_file"].is_null() && r["docv_file"].is_null() && r["docv_bytes"].is_null(), "nothing was written: {r}");
+    assert!(r["md_bytes"].as_u64().unwrap() > 0 && r["src_bytes"].as_u64().unwrap() > 0, "sizes are known even so");
 }
 
 #[tokio::test]

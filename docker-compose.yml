@@ -7,7 +7,7 @@ services:
       # Required: access token (at least 16 characters).
       DOCVISION_TOKEN: ${DOCVISION_TOKEN:?set DOCVISION_TOKEN}
       # Default LLM for PDFs, images, titles, summaries and extraction.
-      # openai, gemini, or any name for an OpenAI-compatible API (then set DOCVISION_LLM_BASE_URL).
+      # openai, gemini, anthropic, or any name for an OpenAI-compatible API (then set DOCVISION_LLM_BASE_URL).
       DOCVISION_LLM_PROVIDER: ${DOCVISION_LLM_PROVIDER:-openai}
       DOCVISION_LLM_MODEL: ${DOCVISION_LLM_MODEL:-}
       DOCVISION_LLM_API_KEY: ${DOCVISION_LLM_API_KEY:-}

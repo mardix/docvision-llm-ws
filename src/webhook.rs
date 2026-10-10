@@ -183,8 +183,24 @@ pub fn render(t: &Value, root: &Value) -> Value {
 async fn body_for(app: &App, eid: &str, job_id: &str, request_id: &str, spec: &WebhookSpec, path: &std::path::Path) -> Option<Payload> {
     let p = path.to_path_buf();
     let Some(template) = &spec.body else {
-        let fields: Vec<String> =
-            ["status", "files", "metadata", "statistics", "llm", "timing", "error"].iter().map(|s| s.to_string()).collect();
+        let fields: Vec<String> = [
+            "status",
+            "src_file",
+            "src_bytes",
+            "dest_file",
+            "md_file",
+            "md_bytes",
+            "docv_file",
+            "docv_bytes",
+            "metadata",
+            "statistics",
+            "llm",
+            "timing",
+            "error",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let mut m = app.cpu.run(move || crate::jobs::select_fields(&p, &fields)).await.ok()?.ok()?;
         let totals = m.remove("llm").and_then(|mut l| l.get_mut("totals").map(Value::take));
         let v = serde_json::json!({
@@ -193,7 +209,13 @@ async fn body_for(app: &App, eid: &str, job_id: &str, request_id: &str, spec: &W
             "job_id": job_id,
             "request_id": request_id,
             "status": m.remove("status"),
-            "files": m.remove("files"),
+            "src_file": m.remove("src_file"),
+            "src_bytes": m.remove("src_bytes"),
+            "dest_file": m.remove("dest_file"),
+            "md_file": m.remove("md_file"),
+            "md_bytes": m.remove("md_bytes"),
+            "docv_file": m.remove("docv_file"),
+            "docv_bytes": m.remove("docv_bytes"),
             "metadata": m.remove("metadata"),
             "statistics": m.remove("statistics"),
             "llm": totals,

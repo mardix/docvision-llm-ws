@@ -137,8 +137,9 @@ async fn native_formats_sync() {
     assert_eq!(d["title"], "Docx Meta Title");
     assert!(d["summary"].as_str().unwrap().starts_with("Extractive summary:"));
     assert!(d["job_id"].is_null());
-    assert!(d["dest_file"].is_null());
-    assert_eq!(d["files"], json!([]));
+    assert!(d["dest_file"].is_null() && d["md_file"].is_null() && d["docv_file"].is_null() && d["docv_bytes"].is_null());
+    assert_eq!(d["src_bytes"].as_u64().unwrap(), std::fs::metadata(&p).unwrap().len(), "the original's size");
+    assert_eq!(d["md_bytes"].as_u64().unwrap(), d["content"].as_str().unwrap().len() as u64);
     assert_eq!(d["llm"]["totals"]["calls"], 0);
     assert!(d["statistics"]["total_words"].as_u64().unwrap() > 100);
     assert!(d["statistics"]["original_total_pages"].is_null());

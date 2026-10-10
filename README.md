@@ -2,7 +2,7 @@
 
 A lean HTTP service that converts documents to Markdown, and can extract structured JSON from them.
 
-- **PDFs and images** are transcribed by an LLM (OpenAI, Gemini or any OpenAI-compatible API).
+- **PDFs and images** are transcribed by an LLM (OpenAI, Gemini, Anthropic Claude or any OpenAI-compatible API).
 - **DOCX, XLSX, PPTX, HTML, Markdown, text** (plus ODT/ODS/ODP/EPUB with `odf-epub`) are parsed natively, without an LLM.
 - Each result includes the Markdown, a title, a summary, chunks, statistics, LLM usage and timings.
 - **Structured data:** pass a JSON Schema, and the result also carries the data it describes (a receipt's merchant and total, an invoice's line items, …).
@@ -51,10 +51,10 @@ Requests can override any of these with the `llm_*` options.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DOCVISION_LLM_PROVIDER` | `openai` | `openai`, `gemini`, or any name for an OpenAI-compatible API |
+| `DOCVISION_LLM_PROVIDER` | `openai` | `openai`, `gemini`, `anthropic`, or any other name for an OpenAI-compatible API |
 | `DOCVISION_LLM_MODEL` | — | The LLM is enabled once this is set |
 | `DOCVISION_LLM_API_KEY` | — | |
-| `DOCVISION_LLM_BASE_URL` | public endpoint | Required for providers other than `openai` and `gemini` |
+| `DOCVISION_LLM_BASE_URL` | public endpoint | Required for providers other than `openai`, `gemini` and `anthropic` |
 | `DOCVISION_LLM_MAX_CONCURRENCY` | `64` | Calls in flight. Halved automatically on `429`/`503` |
 | `DOCVISION_LLM_MAX_RETRIES` | `3` | Retries on network errors, `429` and `5xx` |
 | `DOCVISION_LLM_MAX_OUTPUT_TOKENS` | `16384` | Model output limit. Also sets the PDF pages per call |
@@ -222,7 +222,7 @@ All options are optional, and all are top-level keys in `options`.
 - The page count is read from the PDF itself, so it is always exact. Limit: 2,000 pages.
 - Pages are transcribed in batches of about 16, sized to the model's output limit (`DOCVISION_LLM_MAX_OUTPUT_TOKENS` ÷ ~800 tokens per page), all running in parallel.
 - **Each batch gets its own small PDF** cut from the original, holding only its pages. Calls pay input tokens for their own pages only, and provider per-file limits (size, page count) apply to each piece, not the whole document.
-- A piece over 8 MB is uploaded to the provider's Files API instead of being sent inline. Pieces and uploads are removed when the job ends.
+- A piece over 8 MB is uploaded to the provider's Files API (OpenAI, Gemini) instead of being sent inline. Anthropic and OpenAI-compatible APIs always get pieces inline; Anthropic's limit is 32 MB per request. Pieces and uploads are removed when the job ends.
 - If a batch's output is cut off at the model's limit, the piece is split in half and retried, down to single pages.
 - PDFs that can't be split (encrypted or malformed) are sent whole, with each call naming its page range.
 - With `ocr: auto`, only the scanned pages are sent, as pieces of their own.
@@ -252,12 +252,31 @@ All options are optional, and all are top-level keys in `options`.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `llm_provider` | `DOCVISION_LLM_PROVIDER` | `openai`, `gemini`, or a custom name |
+| `llm_provider` | `DOCVISION_LLM_PROVIDER` | `openai`, `gemini`, `anthropic`, or a custom name |
 | `llm_model` | `DOCVISION_LLM_MODEL` | |
 | `llm_api_key` | `DOCVISION_LLM_API_KEY` | Never logged, stored encrypted |
 | `llm_base_url` | `DOCVISION_LLM_BASE_URL` | Required for custom (OpenAI-compatible) providers |
 
 A provider other than the default needs its own `llm_model` and `llm_api_key`. The default key is never sent to another provider.
+
+**Providers**
+
+| Provider | Endpoint used | Notes |
+| --- | --- | --- |
+| `openai` | `https://api.openai.com/v1` | Chat Completions. Reads PDFs and images natively; large pieces go through the Files API |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta` | Reads PDFs and images natively; large pieces go through the Files API |
+| `anthropic` | `https://api.anthropic.com/v1` | Claude Messages API. Reads PDFs and images natively, sent inline. Runs at low effort for transcription and summaries, a step higher for structured extraction. If Claude declines a document, the request fails with `provider_error` and the reason |
+| any other name | your `llm_base_url` | An OpenAI-compatible API (Ollama, vLLM, OpenRouter, …). Whether PDFs work depends on that API |
+
+Example for Claude:
+
+```bash
+DOCVISION_LLM_PROVIDER=anthropic
+DOCVISION_LLM_MODEL=claude-opus-5-5
+DOCVISION_LLM_API_KEY=your-api-key
+```
+
+The service never picks a model for you. Token usage is reported the same way for every provider: `input_tokens` is everything sent, `cached_tokens` is the part served from the provider's cache, and `output_tokens` includes any reasoning the model did.
 
 **Structured extraction**
 
@@ -279,19 +298,12 @@ See [Structured extraction](#structured-extraction) for how it works.
   "status": "completed",
   "cache_hit": false,
   "src_file": "https://example.com/report.pdf",
-  "dest_file": "s3://bucket/out/report.md",
-  "files": [
-    {
-      "kind": "result_json",
-      "location": "s3://bucket/out/report.docv.json",
-      "bytes": 48213
-    },
-    {
-      "kind": "markdown",
-      "location": "s3://bucket/out/report.md",
-      "bytes": 20117
-    }
-  ],
+  "src_bytes": 4821337,
+  "dest_file": "s3://bucket/out/",
+  "md_file": "s3://bucket/out/report.pdf.md",
+  "md_bytes": 20117,
+  "docv_file": "s3://bucket/out/report.pdf.docv.json",
+  "docv_bytes": 48213,
   "metadata": {
     "ref": "abc-123"
   },
@@ -367,6 +379,15 @@ See [Structured extraction](#structured-extraction) for how it works.
 ```
 
 - `status` is `completed`, `partial` or `failed`.
+- **Files and sizes** (sizes are in bytes; credentials are never included in paths):
+
+  | Field | Meaning | `null` when |
+  | --- | --- | --- |
+  | `src_file`, `src_bytes` | The source document and its size | `src_bytes`: the source couldn't be fetched or converted |
+  | `dest_file` | The destination as you requested it (a folder or a `.md` location) | no destination (always for sync) |
+  | `md_file` | Where the Markdown was written | no destination, or writing failed |
+  | `md_bytes` | Size of the Markdown (the `content` field) | the conversion failed |
+  | `docv_file`, `docv_bytes` | Where the JSON result was written, and its exact size | no destination, or writing failed |
 - `extracted` holds the structured data when `extract_schema` was given (see below), otherwise `null`.
 - `feature_status` reports each optional feature (`title`, `summary`, `chunks`, `language`, `translation`, `extraction`) as `completed`, `failed`, `skipped` or `disabled`, with the method used and any error.
 - `llm.calls` has one record per attempt (provider, model, status, tokens, duration), including retries and failures.
@@ -506,7 +527,7 @@ The result keeps `content` (the Markdown) and adds:
 
 - The document is converted to Markdown first. One extra LLM call then reads that Markdown and returns JSON for your schema, so it works for every format.
 - The model is told to use only facts from the document and to return `null` for anything that is missing, never to guess. Use `["string", "null"]` style types for fields that may be absent.
-- OpenAI enforces the schema with structured outputs. Gemini and OpenAI-compatible APIs use JSON mode.
+- OpenAI and Anthropic enforce the schema with structured outputs. Gemini and OpenAI-compatible APIs use JSON mode.
 - Every answer is checked against `type`, `properties`, `required`, `items` and `enum`. Other keywords (`description`, `format`, …) guide the model but aren't checked. If the answer doesn't match, the model gets one retry with the reason.
 - **If extraction fails,** the conversion still succeeds: `extracted` is `null`, `feature_status.extraction` is `failed` with the reason, and a warning is added. On `extract`, a failure returns `422 extraction_failed`.
 - **Requirements:** `extract_schema` needs an LLM. Without one configured (or passed in `llm_*`), the request is rejected with `400 provider_not_configured`.
@@ -671,7 +692,7 @@ Called after an async job finishes (`webhooks` feature). `payload.webhook` is on
 | `"$$text"` | The literal string `"$text"` |
 | anything else | Sent unchanged |
 
-Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_id`, `status`, `files`, `metadata`, `statistics`, `llm` (totals), `timing` and `error`.
+Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_id`, `status`, the file fields (`src_file`, `src_bytes`, `dest_file`, `md_file`, `md_bytes`, `docv_file`, `docv_bytes`), `metadata`, `statistics`, `llm` (totals), `timing` and `error`. It never includes the content, so the receiver can use the paths and sizes to decide what to fetch.
 
 **Headers sent**
 

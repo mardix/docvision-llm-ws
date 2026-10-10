@@ -1,5 +1,6 @@
 //! Provider abstraction, streamed request bodies, SSE parsing and per-attempt accounting.
 
+pub mod anthropic;
 pub mod compatible;
 pub mod gemini;
 pub mod openai;
@@ -288,6 +289,7 @@ pub async fn send(client: &reqwest::Client, ep: &Endpoint, req: &LlmRequest) -> 
         ProviderKind::Openai => openai::call(client, ep, req, true).await,
         ProviderKind::Compatible => compatible::call(client, ep, req).await,
         ProviderKind::Gemini => gemini::call(client, ep, req).await,
+        ProviderKind::Anthropic => anthropic::call(client, ep, req).await,
     }
 }
 
@@ -302,7 +304,8 @@ pub async fn upload(
     match ep.kind {
         ProviderKind::Openai => openai::upload(client, ep, path, mime).await.map(Some),
         ProviderKind::Gemini => gemini::upload(client, ep, path, mime, size).await.map(Some),
-        ProviderKind::Compatible => Ok(None),
+        // Anthropic and compatible APIs get documents inline.
+        ProviderKind::Anthropic | ProviderKind::Compatible => Ok(None),
     }
 }
 
@@ -311,7 +314,7 @@ pub async fn delete_upload(client: &reqwest::Client, ep: &Endpoint, doc: &DocRef
         let _ = match ep.kind {
             ProviderKind::Openai => openai::delete(client, ep, id).await,
             ProviderKind::Gemini => gemini::delete(client, ep, id).await,
-            ProviderKind::Compatible => Ok(()),
+            ProviderKind::Anthropic | ProviderKind::Compatible => Ok(()),
         };
     }
 }

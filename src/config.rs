@@ -40,6 +40,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Secret<T> {
 pub enum ProviderKind {
     Openai,
     Gemini,
+    Anthropic,
     Compatible,
 }
 
@@ -185,15 +186,19 @@ fn load_providers(vars: &Vars) -> Result<BTreeMap<String, ProviderConfig>, Strin
     let kind = match name.as_str() {
         "openai" => ProviderKind::Openai,
         "gemini" => ProviderKind::Gemini,
+        "anthropic" => ProviderKind::Anthropic,
         _ => ProviderKind::Compatible,
     };
     let base_url = p("BASE_URL").unwrap_or_else(|| match kind {
         ProviderKind::Openai => "https://api.openai.com/v1".into(),
         ProviderKind::Gemini => "https://generativelanguage.googleapis.com/v1beta".into(),
+        ProviderKind::Anthropic => "https://api.anthropic.com/v1".into(),
         ProviderKind::Compatible => String::new(),
     });
     if base_url.is_empty() {
-        return Err(format!("DOCVISION_LLM_BASE_URL is required for provider `{name}` (only openai and gemini have a built-in endpoint)"));
+        return Err(format!(
+            "DOCVISION_LLM_BASE_URL is required for provider `{name}` (only openai, gemini and anthropic have a built-in endpoint)"
+        ));
     }
     let n32 = |f: &str, d: u32| -> Result<u32, String> {
         p(f).map(|v| v.parse().map_err(|_| format!("DOCVISION_LLM_{f}: invalid number"))).unwrap_or(Ok(d))

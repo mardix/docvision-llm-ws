@@ -9,7 +9,7 @@ use crate::extract::{self, Extracted};
 use crate::gateway::Prio;
 use crate::llm::{Accounting, Endpoint, LlmSection};
 use crate::markdown;
-use crate::result::{self, Body, BodySrc, FeatureStatus, FileRef, Header, Statistics, Timing, Trailer};
+use crate::result::{self, Body, BodySrc, FeatureStatus, Header, Statistics, Timing, Trailer};
 use crate::rpc::{AppError, CacheMode, ConvertPayload, Execution, Ocr, Options, Priority, ReqCtx, requester_id, typed};
 use crate::source::{self, Format, Source, Staged};
 use axum::body::Body as HttpBody;
@@ -137,6 +137,16 @@ pub struct Converted {
     pub leader: bool,
     pub cache_key: Option<String>,
     pub fetch_ms: u64,
+    /// Size of the fetched source document.
+    pub src_bytes: Option<u64>,
+}
+
+/// Size of the converted Markdown (`None` when there is no converted body).
+fn md_bytes(body: Option<&BodyRef>) -> Option<u64> {
+    match body? {
+        BodyRef::Owned(b) => Some(b.content.len() as u64),
+        raw => raw.fields(&["statistics"]).get("statistics")?.get("content_bytes")?.as_u64(),
+    }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -149,6 +159,7 @@ pub fn endpoint(app: &App, opts: &Options, required: bool) -> Result<Option<Endp
     let adhoc_kind = match name.as_deref() {
         Some("openai") => Some(ProviderKind::Openai),
         Some("gemini") => Some(ProviderKind::Gemini),
+        Some("anthropic") => Some(ProviderKind::Anthropic),
         _ if opts.llm_base_url.is_some() => Some(ProviderKind::Compatible),
         _ => None,
     };
@@ -173,6 +184,7 @@ pub fn endpoint(app: &App, opts: &Options, required: bool) -> Result<Option<Endp
                 base_url: match kind {
                     ProviderKind::Openai => "https://api.openai.com/v1".into(),
                     ProviderKind::Gemini => "https://generativelanguage.googleapis.com/v1beta".into(),
+                    ProviderKind::Anthropic => "https://api.anthropic.com/v1".into(),
                     ProviderKind::Compatible => String::new(),
                 },
                 model: String::new(),
@@ -444,7 +456,14 @@ async fn async_cache_hit(
     if !app.writer.send_durable(ops).await {
         return Err(AppError::new(503, "db_unavailable", "the job could not be durably recorded; retry later").retry_after(5));
     }
-    let conv = Converted { body: BodyRef::Raw(raw), cache_hit: true, leader: false, cache_key: Some(key), fetch_ms: 0 };
+    let conv = Converted {
+        body: BodyRef::Raw(raw),
+        cache_hit: true,
+        leader: false,
+        cache_key: Some(key),
+        fetch_ms: 0,
+        src_bytes: Some(staged.size),
+    };
     let acct = Arc::new(Accounting::new(spec.request_id.clone(), Some(app.writer.clone())));
     app.metrics.job_state(None, "running");
     let state = finalize_async(app, &spec, Ok(conv), &acct, 0, Instant::now()).await;
@@ -495,12 +514,12 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
     }
     .await;
     let timing_base = (0u64, started);
-    let (status, body, err, fetch_ms, cache_hit) = match res {
+    let (status, body, err, fetch_ms, cache_hit, src_bytes) = match res {
         Ok(c) => {
             let st = if c.body.partial() { "partial" } else { "completed" };
-            (st, Some(c.body), None, c.fetch_ms, c.cache_hit)
+            (st, Some(c.body), None, c.fetch_ms, c.cache_hit, c.src_bytes)
         }
-        Err(e) => ("failed", None, Some(e), 0, false),
+        Err(e) => ("failed", None, Some(e), 0, false, None),
     };
     let timing = timing_for(&acct, body.as_ref(), fetch_ms, timing_base.0, timing_base.1, 0);
     let llm = if cache_hit { LlmSection::default() } else { acct.section() };
@@ -512,8 +531,12 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
         status,
         cache_hit,
         src_file: &src_shown,
+        src_bytes,
         dest_file: None,
-        files: &[],
+        md_file: None,
+        md_bytes: md_bytes(body.as_ref()),
+        docv_file: None,
+        docv_bytes: None,
         metadata: spec.payload.metadata.as_ref(),
     };
     let empty = Body::default();
@@ -680,10 +703,11 @@ async fn pipeline(
     let ep = endpoint(app, opts, needs_llm_extract(spec, Some(format)))?;
     let (p, m) = ep.as_ref().map(|e| (e.provider.clone(), e.model.clone())).unwrap_or(("none".into(), "none".into()));
     let key = cache::key(&staged.hash, opts, &p, &m);
+    let src_bytes = Some(staged.size);
     if opts.cache == CacheMode::Use {
         if let Some(raw) = cache_lookup(app, &key).await {
             app.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Ok(Converted { body: BodyRef::Raw(raw), cache_hit: true, leader: false, cache_key: Some(key), fetch_ms });
+            return Ok(Converted { body: BodyRef::Raw(raw), cache_hit: true, leader: false, cache_key: Some(key), fetch_ms, src_bytes });
         }
         app.metrics.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -693,14 +717,14 @@ async fn pipeline(
     };
     if opts.cache == CacheMode::Bypass {
         let body = make().await?;
-        return Ok(Converted { body: BodyRef::Owned(body), cache_hit: false, leader: true, cache_key: None, fetch_ms });
+        return Ok(Converted { body: BodyRef::Owned(body), cache_hit: false, leader: true, cache_key: None, fetch_ms, src_bytes });
     }
     let (leader, fut) = app.cache.flight(&key, make);
     if !leader {
         app.metrics.singleflight_joins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     let body = fut.await?;
-    Ok(Converted { body: BodyRef::Owned(body), cache_hit: !leader, leader, cache_key: Some(key), fetch_ms })
+    Ok(Converted { body: BodyRef::Owned(body), cache_hit: !leader, leader, cache_key: Some(key), fetch_ms, src_bytes })
 }
 
 /// Live stage of an async job, shown by `history.list` while it runs.
@@ -855,12 +879,20 @@ async fn finalize_async(
     let dest = spec.payload.destination.as_deref().and_then(|d| result::parse_dest(d, &spec.payload.source).ok());
     let path = app.results_dir().join(format!("{job_id}.json"));
     let src_shown = source::sanitize(&spec.payload.source);
-    let (mut status, body, mut err, fetch_ms, cache_hit, leader, key) = match res {
-        Ok(c) => {
-            (if c.body.partial() { "partial" } else { "completed" }, Some(c.body), None, c.fetch_ms, c.cache_hit, c.leader, c.cache_key)
-        }
-        Err(e) => ("failed", None, Some(e), 0, false, false, None),
+    let (mut status, body, mut err, fetch_ms, cache_hit, leader, key, src_bytes) = match res {
+        Ok(c) => (
+            if c.body.partial() { "partial" } else { "completed" },
+            Some(c.body),
+            None,
+            c.fetch_ms,
+            c.cache_hit,
+            c.leader,
+            c.cache_key,
+            c.src_bytes,
+        ),
+        Err(e) => ("failed", None, Some(e), 0, false, false, None, None),
     };
+    let md_size = md_bytes(body.as_ref());
     let llm = if cache_hit { LlmSection::default() } else { acct.section() };
     let empty = Arc::new(Body::default());
     let body_ref = body.clone().unwrap_or(BodyRef::Owned(empty));
@@ -876,14 +908,15 @@ async fn finalize_async(
 
     // Timing is fixed once so repeated writes (self-referential sizes) are byte-stable.
     let fixed_timing = timing_for(acct, body.as_ref(), fetch_ms, queue_ms, started, 0);
-    let write = |status: &'static str, files: Vec<FileRef>, err: Option<&AppError>| {
+    // `published`: where the Markdown and JSON go, plus the JSON's size (it contains itself).
+    let write = |status: &'static str, published: Option<(String, String, u64)>, err: Option<&AppError>| {
         let (app2, path2, body2, llm2, spec2, src2) =
             (app.clone(), path.clone(), body_ref.clone(), llm.clone(), spec.clone(), src_shown.clone());
         let mut timing = fixed_timing.clone();
         if err.is_some() {
             timing.stages.storage_ms = t_store.elapsed().as_millis() as u64;
         }
-        let dest_s = dest.as_ref().map(|d| d.display());
+        let dest_s = spec.payload.destination.as_deref().map(source::sanitize);
         let eb = err.map(|e| e.body());
         let cpu = app2.cpu.clone();
         async move {
@@ -896,8 +929,12 @@ async fn finalize_async(
                         status,
                         cache_hit,
                         src_file: &src2,
+                        src_bytes,
                         dest_file: dest_s.as_deref(),
-                        files: &files,
+                        md_file: published.as_ref().map(|p| p.0.as_str()),
+                        md_bytes: md_size,
+                        docv_file: published.as_ref().map(|p| p.1.as_str()),
+                        docv_bytes: published.as_ref().map(|p| p.2),
                         metadata: spec2.payload.metadata.as_ref(),
                     };
                     let t = Trailer { error: eb.as_ref(), llm: &llm2, timing: &timing };
@@ -912,33 +949,24 @@ async fn finalize_async(
         }
     };
 
-    // Published file list with sizes: the JSON copy is byte-identical to the local file.
-    let files = match (&dest, err.is_none()) {
+    // The published JSON is byte-identical to the local result file.
+    let mut written = match (&dest, err.is_none()) {
         (Some(d), true) => {
-            let md_len = md.as_ref().map_or(0, |m| m.len() as u64);
-            vec![
-                FileRef { kind: "result_json", location: d.json_display(), bytes: 0 },
-                FileRef { kind: "markdown", location: d.display(), bytes: md_len },
-            ]
-        }
-        _ => Vec::new(),
-    };
-    let mut written = if files.is_empty() {
-        write(status, files, err.as_ref()).await
-    } else {
-        // Size is self-referential: iterate until the digit count is stable.
-        let mut files = files;
-        let mut out = write(status, files.clone(), None).await;
-        for _ in 0..3 {
-            match &out {
-                Ok(((_, _, size), _)) if files[0].bytes != *size => {
-                    files[0].bytes = *size;
-                    out = write(status, files.clone(), None).await;
+            // `docv_bytes` is self-referential: rewrite until the digit count is stable.
+            let mut docv_size = 0u64;
+            let mut out = write(status, Some((d.display(), d.json_display(), docv_size)), None).await;
+            for _ in 0..3 {
+                match &out {
+                    Ok(((_, _, size), _)) if docv_size != *size => {
+                        docv_size = *size;
+                        out = write(status, Some((d.display(), d.json_display(), docv_size)), None).await;
+                    }
+                    _ => break,
                 }
-                _ => break,
             }
+            out
         }
-        out
+        _ => write(status, None, err.as_ref()).await,
     };
     if let (Ok(_), Some(d)) = (&written, &dest)
         && err.is_none()
@@ -946,13 +974,13 @@ async fn finalize_async(
     {
         // Never claim a destination was written when storage failed.
         status = "failed";
-        written = write(status, Vec::new(), Some(&e)).await;
+        written = write(status, None, Some(&e)).await;
         err = Some(e);
     }
     if let Err(e) = &written {
         status = "failed";
         err = Some(e.clone());
-        let _ = write(status, Vec::new(), Some(e)).await;
+        let _ = write(status, None, Some(e)).await;
     }
     let ((bs, be, size), timing) = written.unwrap_or(((0, 0, 0), Timing::default()));
     if status != "failed"

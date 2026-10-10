@@ -16,13 +16,6 @@ use std::path::{Path, PathBuf};
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct FileRef {
-    pub kind: &'static str,
-    pub location: String,
-    pub bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct Header<'a> {
     pub schema_version: u32,
     pub request_id: &'a str,
@@ -30,8 +23,17 @@ pub struct Header<'a> {
     pub status: &'a str,
     pub cache_hit: bool,
     pub src_file: &'a str,
+    /// Size of the source document (`null` when it could not be fetched or converted).
+    pub src_bytes: Option<u64>,
+    /// The destination as requested (a folder or a `.md` location).
     pub dest_file: Option<&'a str>,
-    pub files: &'a [FileRef],
+    /// Where the Markdown was written (`null` without a destination), and its size (always set
+    /// for a converted document).
+    pub md_file: Option<&'a str>,
+    pub md_bytes: Option<u64>,
+    /// Where the JSON result was written and its exact size (`null` without a destination).
+    pub docv_file: Option<&'a str>,
+    pub docv_bytes: Option<u64>,
     pub metadata: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
@@ -491,8 +493,12 @@ mod tests {
             status: "completed",
             cache_hit: false,
             src_file: "/a.md",
+            src_bytes: Some(4),
             dest_file: None,
-            files: &[],
+            md_file: None,
+            md_bytes: None,
+            docv_file: None,
+            docv_bytes: None,
             metadata: None,
         };
         let t = Trailer { error: None, llm: &llm, timing: &timing };
