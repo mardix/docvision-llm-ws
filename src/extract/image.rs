@@ -18,7 +18,7 @@ pub fn check_pixels(path: &Path, max_pixels: u64) -> Result<(u64, u64), AppError
     Ok((w, h))
 }
 
-const SYSTEM_VISION: &str = "You are a precise document transcription engine. Transcribe the image to clean GitHub-flavored Markdown: preserve headings, paragraphs, lists, tables (as GFM tables) and reading order. Do not summarize, translate or add commentary. If the image contains no text, return an empty response. Output only the Markdown.";
+const SYSTEM_VISION: &str = "You convert images to clean GitHub-flavored Markdown so they can be read and searched. Transcribe all visible text exactly, preserving headings, paragraphs, lists, tables (as GFM tables) and reading order. For content that is not text (photos, illustrations, charts, diagrams, logos, screenshots), add a concise factual description of what is shown, including labels and data values that are readable. If the image contains no text at all, output only that description. Never return an empty response. Do not translate, and do not comment on the task. Output only the Markdown.";
 
 /// Transcribe an image with LLM vision.
 #[allow(clippy::too_many_arguments)]
@@ -44,7 +44,7 @@ pub async fn run(
     let ep = ep.ok_or_else(|| AppError::bad_request("provider_not_configured", "image transcription needs an LLM provider"))?;
     let req = crate::llm::LlmRequest {
         system: SYSTEM_VISION.into(),
-        user: "Transcribe this image to Markdown.".into(),
+        user: "Convert this image to Markdown: transcribe its text and describe any non-text content.".into(),
         doc: Some(crate::llm::DocRef::Inline {
             path: staged.path.clone(),
             mime: format.mime(),
@@ -64,6 +64,9 @@ pub async fn run(
     if r.truncated {
         ex.partial = true;
         ex.warnings.push("transcription was truncated at the model output limit".into());
+    }
+    if ex.content.trim().is_empty() {
+        ex.warnings.push("the model returned no content for this image".into());
     }
     Ok(ex)
 }

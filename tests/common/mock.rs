@@ -26,6 +26,8 @@ pub struct MockState {
     pub omit_usage: AtomicBool,
     /// Report finish_reason=length for transcription requests spanning more than one page.
     pub truncate_multi_page: AtomicBool,
+    /// Answer image transcriptions with an empty response (a model that found nothing to say).
+    pub empty_image: AtomicBool,
     /// Wrap transcriptions like some models do: preamble + ```markdown fence.
     pub wrap_markdown: AtomicBool,
     /// Answer this many structured-extraction requests with JSON that misses required fields.
@@ -104,7 +106,7 @@ fn reply_for(st: &MockState, system: &str, user_text: &str, has_file: bool, json
         user_text.split_once("\n\n").map(|x| x.1.to_string()).unwrap_or_default()
     } else if has_file && user_text.contains("image") && !user_text.contains("PDF") {
         st.transcriptions.fetch_add(1, SeqCst);
-        "# Image Heading\n\nMock image text.\n".to_string()
+        if st.empty_image.load(SeqCst) { String::new() } else { "# Image Heading\n\nMock image text.\n".to_string() }
     } else if has_file {
         st.transcriptions.fetch_add(1, SeqCst);
         let pages = pages_requested(user_text);

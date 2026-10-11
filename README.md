@@ -74,6 +74,7 @@ Requests can override any of these with the `llm_*` options.
 | `POST /rpc` | token | All operations (below) |
 | `GET /_/dashboard` | token, entered in the page | Dashboard: live activity, in-progress requests, paginated request history and failures (filter by requester, operation, format, status) with file paths and sizes, and forms to run `convert`, `summarize`, `chunk` and `extract` |
 | `GET /_/doc` | none | This README as a web page |
+| `GET /_/db` | token | Download a snapshot of the SQLite database (the dashboard has a button for it). `404` when the database is PostgreSQL |
 | `GET /metrics` | token | Prometheus metrics |
 | `GET /livez` | none | `200 ok` while the process is up |
 
@@ -226,7 +227,20 @@ All options are optional, and all are top-level keys in `options`.
 - If a batch's output is cut off at the model's limit, the piece is split in half and retried, down to single pages.
 - PDFs that can't be split (encrypted or malformed) are sent whole, with each call naming its page range.
 - With `ocr: auto`, only the scanned pages are sent, as pieces of their own.
+- Meaningful figures (charts, diagrams, photos, maps, tables shown as images) get a short factual description at the point where they appear; decorative elements such as logos and borders are ignored. A page with no text gets a description of what it shows.
 - The LLM receives the PDF itself, so it uses the text layer and the page images. Page-by-page images are only sent with `pdf_skip_local_processing: false` (`pdf-render` feature).
+
+**How images are processed**
+
+- PNG, JPEG and WebP are sent to the LLM as they are. Other image types (HEIC, GIF, TIFF, BMP) return `415 unsupported_format`.
+- The model transcribes all visible text and adds a short factual description of content that isn't text (photos, charts, diagrams, logos, screenshots). An image with no text at all becomes a description, so every image yields searchable Markdown.
+- If the model still returns nothing, the result is `completed` with empty `content` and the warning `the model returned no content for this image`.
+
+**Cache**
+
+- A conversion is cached by the document's content, the options that affect the output, and the provider and model. A repeat is served from the cache with `cache_hit: true`, no LLM calls and no extraction time.
+- Empty results are never cached, so a blank answer can't repeat.
+- `cache: "bypass"` skips the cache for one request; `cache: "refresh"` converts again and replaces the cached result.
 
 **Enrichment**
 
@@ -596,6 +610,7 @@ Waits for a state change (30 s at most). Returns the same data as `job.get` with
 - `format` filters by detected document format (`pdf`, `docx`, `xlsx`, `pptx`, `html`, `markdown`, `text`, `png`, `jpeg`, `webp`, …).
 - Each item includes `requester_id`, `format`, `llm_provider` and `llm_model` (`null` when no LLM was used), status, timings, statistics and token usage.
 - Each item also carries the file fields of the result: `source`, `src_bytes`, `dest_file`, `md_file`, `md_bytes`, `docv_file` and `docv_bytes`. They stay in history after the result itself has expired.
+- `cache_hit` says whether the request was served from the result cache.
 - Returns `{"items": [...], "has_more": true, "next_cursor": "…"}`.
 - Pass `next_cursor` back as `cursor` to get the next page.
 - History never stores tokens, credentials, document content or prompts.
@@ -642,7 +657,7 @@ Returns `request` (the same fields as a `history.list` item, plus options and me
 }
 ```
 
-- Returns `status`, `version`, `features`, `uptime_ms`, `db_writer`, `queue`, `memory` and the `providers` breaker states (`closed`, `open`, `half_open`).
+- Returns `status`, `version`, `features`, `uptime_ms`, `database` (`sqlite` or `postgres`), `db_writer`, `queue`, `memory` and the `providers` breaker states (`closed`, `open`, `half_open`).
 - Returns `503 not_ready` when the database writer is down or lagging.
 
 <br>
@@ -734,6 +749,8 @@ The access token grants full use of the service, so treat it like a password and
 - **Read local files** the service can read (by absolute path). `/proc`, `/sys` and `/dev` are always refused, after symlinks are resolved, so the process environment and its secrets can't be read. In Docker the service sees only its image and what you mount; mount document folders read-only.
 - **Write destinations** (`.md` plus `.docv.json`) anywhere the service can write, replacing existing files of those names unless `overwrite: false`. In Docker, that's `/data` and any writable mounts.
 - **Fetch URLs** over `https://` (and `http://` on localhost only), including hosts on your internal network. Webhooks follow the same rule. Run the service where it can only reach what it should.
+
+- **Download the database** (`GET /_/db`, SQLite only): the full request history, including sources, metadata and error messages. Stored job secrets (API keys, S3 credentials, webhook headers) stay encrypted inside it.
 
 What the service guarantees:
 

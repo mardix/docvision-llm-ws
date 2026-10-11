@@ -450,3 +450,38 @@ async fn llm_markdown_wrappers_are_removed() {
     let (_, v) = s.convert_sync(&p, opts).await;
     assert_eq!(v["data"]["content"], "# Image Heading\n\nMock image text.\n");
 }
+
+#[tokio::test]
+async fn empty_image_result_is_flagged_and_never_cached() {
+    let s = server().await;
+    let p = s.write("photo.png", &fixtures::png(64, 64));
+    let opts = json!({"gen_title": false, "gen_summary": false});
+    // The model answers with nothing: the result says so, and the blank is not cached.
+    s.mock.empty_image.store(true, SeqCst);
+    let (_, v) = s.rpc("convert", json!({"source": p}), opts.clone()).await;
+    let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
+    assert_eq!(j["status"], "completed", "{j}");
+    assert_eq!(j["result"]["content"], "");
+    assert!(j["result"]["warnings"].to_string().contains("returned no content for this image"), "{}", j["result"]["warnings"]);
+    s.flush().await;
+    // The next request converts again instead of repeating the blank from the cache.
+    s.mock.empty_image.store(false, SeqCst);
+    let (_, v) = s.rpc("convert", json!({"source": p}), opts.clone()).await;
+    assert_eq!(v["data"]["cache_hit"], false, "{v}");
+    let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
+    assert!(j["result"]["content"].as_str().unwrap().contains("Mock image text."), "{j}");
+    assert_eq!(j["result"]["cache_hit"], false);
+    assert_eq!(s.mock.transcriptions.load(SeqCst), 2);
+    s.flush().await;
+    // A real result is cached; the cache hit is visible in the result and in history.
+    let (_, v) = s.rpc("convert", json!({"source": p}), opts).await;
+    let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
+    assert_eq!(j["result"]["cache_hit"], true, "{j}");
+    assert_eq!(s.mock.transcriptions.load(SeqCst), 2, "no new LLM call");
+    s.flush().await;
+    let (_, h) = s.rpc("history.get", json!({"request_id": j["request_id"]}), json!({})).await;
+    assert_eq!(h["data"]["request"]["cache_hit"], true, "{h}");
+    let (_, l) = s.rpc("history.list", json!({"limit": 3}), json!({})).await;
+    let hits: Vec<&Value> = l["data"]["items"].as_array().unwrap().iter().map(|i| &i["cache_hit"]).collect();
+    assert_eq!(hits, [&json!(true), &json!(false), &json!(false)], "newest first");
+}

@@ -283,7 +283,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-const SYSTEM_TRANSCRIBE: &str = "You are a precise document transcription engine. Convert the requested pages of the attached PDF to clean GitHub-flavored Markdown. Preserve headings, paragraphs, lists, tables (as GFM tables), links and reading order. Transcribe text in scanned or image-only pages too. Do not summarize, translate or add commentary, and do not repeat page headers/footers as headings. Output only the Markdown.";
+const SYSTEM_TRANSCRIBE: &str = "You are a precise document transcription engine. Convert the requested pages of the attached PDF to clean GitHub-flavored Markdown. Preserve headings, paragraphs, lists, tables (as GFM tables), links and reading order. Transcribe text in scanned or image-only pages too. Where a page shows a meaningful figure (chart, diagram, photo, map, or a table shown as an image), add a concise factual description of it at that point, including labels and data values that are readable; ignore decorative elements such as logos, borders and backgrounds. A page with no text gets the description of what it shows. Do not summarize or translate the text, do not comment on the task, and do not repeat page headers/footers as headings. Output only the Markdown.";
 
 struct Llm<'a> {
     app: &'a App,

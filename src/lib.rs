@@ -120,6 +120,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/livez", get(rpc::livez))
         .route("/_/dashboard", get(rpc::dashboard))
         .route("/_/doc", get(doc::doc))
+        .route("/_/db", get(rpc::db_download))
         .layer(CompressionLayer::new().compress_when(SizeAbove::new(4096).and(NotForContentType::IMAGES)))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(body_cap))
         .with_state(app)
@@ -154,6 +155,7 @@ pub async fn health(app: &App, ctx: &rpc::ReqCtx) -> axum::response::Response {
         "version": env!("CARGO_PKG_VERSION"),
         "features": compiled_features(),
         "uptime_ms": app.started.elapsed().as_millis() as u64,
+        "database": app.db.kind(),
         "db_writer": {"alive": alive, "lag_ms": lag, "pending_ops": app.writer.pending()},
         "queue": {"depth": app.admission.queue_len(), "capacity": app.cfg.queue_depth * 2, "running_jobs": app.running_jobs.load(std::sync::atomic::Ordering::Relaxed)},
         "memory": {"in_use_kib": app.admission.memory_in_use_kib(), "budget_kib": app.admission.total_kib()},

@@ -124,6 +124,8 @@
   .filters select, .filters input { border: 1px solid var(--line-strong); background: var(--panel); border-radius: 8px; padding: 6px 10px; font-size: 13px; }
   .filters input:focus, .filters select:focus { outline: 3px solid var(--accent-soft); border-color: #a5b4fc; }
 
+  .foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line-strong); font-size: 13px; }
+
   /* new request panel */
   #newPanel { padding: 20px; margin-bottom: 8px; }
   #newPanel .head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 18px; }
@@ -352,6 +354,13 @@
         <div class="pager" id="failuresPager"></div>
       </div>
     </section>
+
+    <footer class="foot hidden" id="dbFooter">
+      <span class="muted">Database: SQLite. The download is a full snapshot of jobs and request history; stored secrets stay encrypted.</span>
+      <span class="spacer"></span>
+      <span class="hint" id="dbStatus"></span>
+      <button class="btn" id="dbDownload" type="button">Download database</button>
+    </footer>
   </main>
 </div>
 
@@ -396,6 +405,21 @@
   const model = (i) => i.llm_model ? el("span", { class: "tag", title: (i.llm_provider || "") + " / " + i.llm_model }, i.llm_model) : el("span", { class: "muted" }, "—");
   const requester = (r) => el("span", { class: "tag" }, r || "unknown");
   const fmt = (f) => f ? el("span", { class: "fmt" }, f) : el("span", { class: "muted" }, "—");
+  // "42 seconds", "12 minutes", "5 h 12 min", "3 days 4 h", "3 months 12 days", "1 year 2 months"
+  const uptime = (v) => {
+    if (v == null) return "—";
+    const s = Math.floor(v / 1000), plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+    if (s < 60) return plural(s, "second");
+    const m = Math.floor(s / 60);
+    if (m < 60) return plural(m, "minute");
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + " h " + (m % 60) + " min";
+    const d = Math.floor(h / 24);
+    if (d < 60) return plural(d, "day") + " " + (h % 24) + " h";
+    // Months are counted as 30 days: close enough for an uptime display.
+    if (d < 365) return plural(Math.floor(d / 30), "month") + " " + plural(d % 30, "day");
+    return plural(Math.floor(d / 365), "year") + " " + plural(Math.floor((d % 365) / 30), "month");
+  };
   const bytes = (n) => {
     if (n === null || n === undefined) return "—";
     if (n < 1024) return n + " B";
@@ -406,6 +430,8 @@
   };
   // A stored path with its size, or a dash when the file was not written.
   const fileLine = (path, size) => path ? path + (size != null ? "  ·  " + bytes(size) : "") : "—";
+  // Status, plus a marker when the result came from the cache (no LLM work was done).
+  const statusCell = (i) => i.cache_hit ? el("span", {}, pill(shownStatus(i)), " ", el("span", { class: "tag", title: "Served from the result cache: no extraction, no LLM calls" }, "cached")) : pill(shownStatus(i));
   const tokens = (u) => u && (u.input_tokens || u.output_tokens) ? num((u.input_tokens || 0) + (u.output_tokens || 0)) : "—";
   const kpi = (label, value, sub, cls, meter) => el("div", { class: "card kpi" },
     el("div", { class: "label" }, label), el("div", { class: "value " + (cls || "") }, value),
@@ -507,7 +533,7 @@
       kpi("Memory reserved", memPct + "%", Math.round(L.memory_in_use_kib / 1024) + " of " + Math.round(L.memory_budget_kib / 1024) + " MiB", "", memPct),
       kpi("LLM provider", providers.length ? health[0] : "Idle", null, providers.length ? health[1] : ""),
       kpi("Database", L.db_writer_alive ? "OK" : "Down", null, L.db_writer_alive ? "ok" : "bad"),
-      kpi("Uptime", ms(L.uptime_ms)),
+      kpi("Uptime", uptime(L.uptime_ms), "since " + new Date(Date.now() - L.uptime_ms).toLocaleString()),
     );
     const r = s.requests, st = r.by_status || {}, l = s.llm;
     $("windowLabel").textContent = "since " + new Date(s.since).toLocaleString() + (s.truncated ? " · first 100,000 requests" : "");
@@ -527,6 +553,7 @@
     bars($("byStatus"), "By status", sorted(st));
     bars($("byOperation"), "By operation", sorted(r.by_operation));
     $("requesters").replaceChildren(...(r.by_requester || []).map((x) => el("option", { value: x.name })));
+    $("dbFooter").classList.toggle("hidden", L.database !== "sqlite");
     const failed = st.failed || 0;
     $("failCount").textContent = num(failed);
     $("failCount").className = "count" + (failed ? " bad" : "");
@@ -540,7 +567,7 @@
         [ago(i.created_at)], [requester(i.requester_id)],
         [i.operation + (i.execution ? " · " + i.execution : "")],
         [fmt(i.format || (i.statistics && i.statistics.format))],
-        [i.source || "—", "src"], [bytes(i.src_bytes), "num"], [bytes(i.md_bytes), "num"], [model(i)], [pill(shownStatus(i))],
+        [i.source || "—", "src"], [bytes(i.src_bytes), "num"], [bytes(i.md_bytes), "num"], [model(i)], [statusCell(i)],
         [ms(i.timings && i.timings.total_ms), "num"],
         [i.statistics && i.statistics.original_total_pages != null ? num(i.statistics.original_total_pages) : "—", "num"],
         [tokens(i.usage), "num"],
@@ -625,6 +652,7 @@
           el("dt", {}, "Markdown file"), el("dd", {}, q.md_file ? fileLine(q.md_file, q.md_bytes) : (q.md_bytes != null ? "not written  ·  " + bytes(q.md_bytes) : "—")),
           el("dt", {}, "JSON file"), el("dd", {}, fileLine(q.docv_file, q.docv_bytes)),
           el("dt", {}, "Format"), el("dd", {}, q.format || st.format || "—"),
+          el("dt", {}, "Cache"), el("dd", {}, q.cache_hit ? "Served from cache (no extraction, no LLM calls)" : q.cache_hit === false ? "Not cached: converted for this request" : "—"),
           el("dt", {}, "Created"), el("dd", {}, q.created_at ? new Date(q.created_at).toLocaleString() : "—"),
           el("dt", {}, "Duration"), el("dd", {}, ms(q.timings && q.timings.total_ms)),
           el("dt", {}, "Pages · words"), el("dd", {}, num(st.original_total_pages) + " · " + num(st.total_words)),
@@ -634,6 +662,7 @@
         ),
       ];
       if (q.error) parts.push(el("h4", {}, "Error"), el("pre", {}, JSON.stringify(q.error, null, 2)));
+      if (q.warnings && q.warnings.length) parts.push(el("h4", {}, "Warnings"), el("pre", { class: "warn" }, q.warnings.join("\n")));
       const evBox = el("div", { class: "card tablewrap" });
       table(evBox, [["Time"], ["Stage"], ["Event"], ["Detail"]], (g.events.items || []).map((e) => {
         let detail = e.detail || "";
@@ -851,6 +880,24 @@
         items: { type: "array", items: { type: "object", properties: { name: { type: "string" }, qty: { type: "number" }, price: { type: "number" } } } },
       },
     }, null, 2);
+  };
+  $("dbDownload").onclick = async () => {
+    const btn = $("dbDownload"), status = $("dbStatus");
+    btn.disabled = true; status.className = "hint"; status.textContent = "Preparing snapshot…";
+    try {
+      const r = await fetch("/_/db", { headers: { "X-ACCESS-TOKEN": sessionStorage.getItem(KEY) || "" } });
+      if (r.status === 401) { signOut("Invalid token."); return; }
+      if (!r.ok) throw new Error(await r.text() || "download failed");
+      const name = ((r.headers.get("content-disposition") || "").match(/filename="([^"]+)"/) || [])[1] || "docvision.sqlite";
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = el("a", { href: url, download: name });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      status.textContent = "Downloaded " + name + " (" + bytes(blob.size) + ")";
+    } catch (e) {
+      status.className = "hint error"; status.textContent = e.message;
+    } finally { btn.disabled = false; }
   };
   $("closeNew").onclick = () => $("newPanel").classList.add("hidden");
   $("opTabs").onclick = (ev) => { if (ev.target.dataset.op) setOp(ev.target.dataset.op); };

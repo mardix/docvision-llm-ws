@@ -187,6 +187,43 @@ pub async fn metrics(State(app): State<Arc<App>>, headers: HeaderMap) -> Respons
     r
 }
 
+/// `GET /_/db`: download a snapshot of the SQLite database (token required).
+pub async fn db_download(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    if app.db.kind() != "sqlite" {
+        return (StatusCode::NOT_FOUND, "the database is not SQLite; use your PostgreSQL tools to back it up").into_response();
+    }
+    let path = app.staging_dir().join(format!("db-export-{}.sqlite", uuid::Uuid::now_v7()));
+    let opened = async {
+        app.db.snapshot_sqlite(&path).await.map_err(|e| e.to_string())?;
+        let file = tokio::fs::File::open(&path).await.map_err(|e| e.to_string())?;
+        let len = file.metadata().await.map_err(|e| e.to_string())?.len();
+        Ok::<_, String>((file, len))
+    }
+    .await;
+    // The open handle keeps the data readable; the name is removed right away so nothing is left behind.
+    let _ = tokio::fs::remove_file(&path).await;
+    let (file, len) = match opened {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(target: "docvision_llm_ws::db", error = %e, "database snapshot failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "could not create a database snapshot").into_response();
+        }
+    };
+    let stamp = crate::db::rfc3339(now_ms()).chars().filter(|c| c.is_ascii_digit()).take(14).collect::<String>();
+    let mut r = Response::new(Body::from_stream(tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024)));
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/vnd.sqlite3"));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"docvision-{stamp}.sqlite\"")) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    r
+}
+
 fn log_rejected(app: &App, ctx: &ReqCtx, status: u16, code: &str) {
     if app.reject_cap.allow(app.cfg.reject_log_per_sec) {
         app.writer.send(WriteOp::InsertRequest(RequestRow {

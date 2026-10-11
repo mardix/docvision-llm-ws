@@ -500,3 +500,32 @@ async fn requester_model_in_progress_and_doc_page() {
     let html = r.text().await.unwrap();
     assert!(html.contains("id=\"webhooks\"") && html.contains("<table>") && html.contains("/_/dashboard"));
 }
+
+#[tokio::test]
+async fn database_download() {
+    let s = server().await;
+    let p = s.write("n.md", b"# Notes\n\nSome text.\n");
+    assert_eq!(s.convert_sync(&p, json!({"title_method": "local", "summary_method": "local"})).await.0, 200);
+    s.flush().await;
+    // The token is required.
+    assert_eq!(s.client.get(format!("{}/_/db", s.url)).send().await.unwrap().status(), 401);
+    let r = s.client.get(format!("{}/_/db", s.url)).header("x-access-token", TOKEN).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "application/vnd.sqlite3");
+    let disposition = r.headers()["content-disposition"].to_str().unwrap().to_string();
+    assert!(disposition.starts_with("attachment; filename=\"docvision-") && disposition.ends_with(".sqlite\""), "{disposition}");
+    let body = r.bytes().await.unwrap();
+    assert!(body.starts_with(b"SQLite format 3\0"), "a real SQLite file");
+    // It is a complete snapshot: the request just made is in it.
+    let needle = b"n.md";
+    assert!(body.windows(needle.len()).any(|w| w == needle), "the snapshot includes recent history");
+    // Nothing is left behind in staging.
+    let left: Vec<_> = std::fs::read_dir(s.dir.join("staging"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("db-export"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    let (_, st) = s.rpc("stats", json!({}), json!({})).await;
+    assert_eq!(st["data"]["live"]["database"], "sqlite");
+}

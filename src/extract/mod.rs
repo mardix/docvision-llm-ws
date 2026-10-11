@@ -18,7 +18,9 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-pub const EXTRACTOR_VERSION: &str = "1";
+/// Part of the cache key: bump it when extraction output changes (prompts, chunking), so results
+/// produced by older logic are not served from the cache.
+pub const EXTRACTOR_VERSION: &str = "2";
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct PageCount {

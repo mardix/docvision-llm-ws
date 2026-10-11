@@ -200,6 +200,22 @@ impl Db {
         Self::open_conn(&self.url, self.backend).await
     }
 
+    /// `sqlite` or `postgres`.
+    pub fn kind(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => "sqlite",
+            Backend::Postgres => "postgres",
+        }
+    }
+
+    /// Write a consistent copy of the SQLite database to `dest` (includes what is still in the
+    /// write-ahead log, which a plain file copy would miss).
+    pub async fn snapshot_sqlite(&self, dest: &std::path::Path) -> DbResult<()> {
+        let mut conn = Self::open_conn(&self.url, self.backend).await?;
+        sqlx::query("VACUUM INTO $1").bind(dest.to_string_lossy().into_owned()).execute(&mut conn).await?;
+        conn.close().await
+    }
+
     pub async fn ping(&self) -> bool {
         sqlx::query("SELECT 1").fetch_one(&self.pool).await.is_ok()
     }

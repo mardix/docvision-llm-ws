@@ -556,7 +556,10 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
             http_status: Some(http as i64),
             finished_at: now_ms(),
             timings: serde_json::to_string(&timing).ok(),
-            statistics: stats_with_format(&stats, serde_json::json!({"src_bytes": src_bytes, "md_bytes": md_bytes(body.as_ref())})),
+            statistics: stats_with_format(
+                &stats,
+                serde_json::json!({"src_bytes": src_bytes, "md_bytes": md_bytes(body.as_ref()), "cache_hit": cache_hit}),
+            ),
             format: stats.get("format").and_then(Value::as_str).map(str::to_string),
             usage: serde_json::to_string(&llm.totals).ok(),
             warnings: stats.get("warnings").map(Value::to_string),
@@ -988,9 +991,11 @@ async fn finalize_async(
         let _ = write(status, None, Some(e)).await;
     }
     let ((bs, be, size), timing) = written.unwrap_or(((0, 0, 0), Timing::default()));
+    // An empty result is never cached: it may be a model hiccup, and caching would make it stick.
     if status != "failed"
         && leader
         && spec.options.cache != CacheMode::Bypass
+        && md_size.is_some_and(|n| n > 0)
         && let Some(k) = &key
     {
         app.writer.send(WriteOp::CachePut {
@@ -1005,6 +1010,7 @@ async fn finalize_async(
     let stats = body.as_ref().map(|b| b.fields(&["statistics", "warnings", "format"])).unwrap_or_default();
     let published = dest.as_ref().filter(|_| err.is_none());
     let files = serde_json::json!({
+        "cache_hit": cache_hit,
         "src_bytes": src_bytes,
         "dest_file": spec.payload.destination.as_deref().map(source::sanitize),
         "md_file": published.map(|d| d.display()),
