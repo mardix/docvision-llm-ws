@@ -205,6 +205,7 @@ pub async fn image_file(
         "webp" => "image/webp",
         "bmp" => "image/bmp",
         "tif" => "image/tiff",
+        "jp2" => "image/jp2",
         "svg" => "image/svg+xml",
         "emf" => "image/emf",
         "wmf" => "image/wmf",

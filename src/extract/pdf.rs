@@ -688,7 +688,178 @@ pub async fn run(
         }
     }
     ex.content = out;
+    if opts.extract_images {
+        #[cfg(feature = "pdf-native")]
+        {
+            let (path, max_pixels) = (staged.path.clone(), app.cfg.max_decoded_pixels);
+            let (found, unsupported) = app
+                .cpu
+                .run(move || page_images(&path, max_pixels))
+                .await
+                .map_err(|_| AppError::new(422, "corrupt_document", "PDF image extraction failed").stage("extraction"))?
+                .unwrap_or_default();
+            place_page_images(&mut ex, found);
+            let mut collected = super::images::Images::new(true);
+            super::images::resolve(&mut ex, None, &mut collected)?;
+            collected.finish(&mut ex);
+            if unsupported > 0 {
+                ex.warnings.push(format!(
+                    "{unsupported} PDF image(s) use an encoding that is not extracted (fax/JBIG2 scans or unusual color spaces)"
+                ));
+            }
+        }
+        #[cfg(not(feature = "pdf-native"))]
+        ex.warnings.push("extract_images for PDFs needs the pdf-native feature".into());
+    }
     Ok(ex)
+}
+
+/// Images found per page: (page number, image bytes), plus the count of unsupported encodings.
+#[cfg(feature = "pdf-native")]
+type PageImages = (Vec<(u32, Vec<u8>)>, usize);
+
+/// Embedded images per page: `(page, file bytes)`, plus how many were skipped because their
+/// encoding isn't handled. JPEG and JPEG 2000 are kept byte for byte; uncompressed or
+/// Flate-compressed 8-bit RGB/gray pixels are written as PNG. Images on a page's own resources
+/// are found (not those nested inside form XObjects).
+#[cfg(feature = "pdf-native")]
+fn page_images(path: &std::path::Path, max_pixels: u64) -> Result<PageImages, String> {
+    let doc = lopdf::Document::load(path).map_err(|e| e.to_string())?;
+    let (mut out, mut unsupported) = (Vec::new(), 0usize);
+    for (num, id) in doc.get_pages() {
+        let Ok(images) = doc.get_page_images(id) else { continue };
+        for img in images {
+            let filters: Vec<&str> = img.filters.iter().flatten().map(String::as_str).collect();
+            let (w, h) = (img.width.max(0) as u64, img.height.max(0) as u64);
+            if w == 0 || h == 0 || w.saturating_mul(h) > max_pixels {
+                continue;
+            }
+            let bytes = match filters.last().copied() {
+                Some("DCTDecode") if filters.len() == 1 => Some(img.content.to_vec()),
+                Some("JPXDecode") if filters.len() == 1 => Some(img.content.to_vec()),
+                None | Some("FlateDecode") if filters.iter().all(|f| *f == "FlateDecode") => {
+                    let channels = match img.color_space.as_deref() {
+                        Some("DeviceRGB" | "CalRGB") => 3,
+                        Some("DeviceGray" | "CalGray") => 1,
+                        Some("ICCBased") => icc_channels(&doc, img.origin_dict).unwrap_or(0),
+                        _ => 0,
+                    };
+                    let pixels = if channels > 0 && img.bits_per_component == Some(8) {
+                        let limit = (w * h * channels) as usize;
+                        doc.get_object(img.id).and_then(lopdf::Object::as_stream).ok().and_then(|s| {
+                            if filters.is_empty() { Some(s.content.clone()) } else { s.decompressed_content_with_limit(limit + 1).ok() }
+                        })
+                    } else {
+                        None
+                    };
+                    pixels.filter(|p| p.len() as u64 == w * h * channels).map(|p| encode_png(w as u32, h as u32, channels as u8, &p))
+                }
+                _ => None,
+            };
+            match bytes {
+                Some(b) => out.push((num, b)),
+                None => unsupported += 1,
+            }
+        }
+    }
+    Ok((out, unsupported))
+}
+
+/// Components of an ICC-based color space (`[/ICCBased <stream with /N>]`).
+#[cfg(feature = "pdf-native")]
+fn icc_channels(doc: &lopdf::Document, dict: &lopdf::Dictionary) -> Option<u64> {
+    let cs = dict.get(b"ColorSpace").ok()?;
+    let cs = match cs {
+        lopdf::Object::Reference(r) => doc.get_object(*r).ok()?,
+        o => o,
+    };
+    let arr = cs.as_array().ok()?;
+    let profile = match arr.get(1)? {
+        lopdf::Object::Reference(r) => doc.get_object(*r).ok()?,
+        o => o,
+    };
+    match profile.as_stream().ok()?.dict.get(b"N").ok()?.as_i64().ok()? {
+        n @ (1 | 3) => Some(n as u64),
+        _ => None,
+    }
+}
+
+/// Minimal PNG (8-bit gray or RGB, no filtering) for raw PDF pixels.
+#[cfg(feature = "pdf-native")]
+pub fn encode_png(w: u32, h: u32, channels: u8, pixels: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    fn crc(data: &[u8]) -> u32 {
+        let mut c = 0xFFFF_FFFFu32;
+        for b in data {
+            c ^= *b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend(crc(&body).to_be_bytes());
+    }
+    let row = w as usize * channels as usize;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    for line in pixels.chunks(row) {
+        let _ = z.write_all(&[0]);
+        let _ = z.write_all(line);
+    }
+    let idat = z.finish().unwrap_or_default();
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend(w.to_be_bytes());
+    ihdr.extend(h.to_be_bytes());
+    ihdr.extend([8, if channels == 3 { 2 } else { 0 }, 0, 0, 0]);
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &idat);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// Put each page's images at the end of the text that covers that page (a batch of pages
+/// when the LLM transcribed several together); pages without text get them at the end.
+#[cfg(feature = "pdf-native")]
+fn place_page_images(ex: &mut super::Extracted, found: Vec<(u32, Vec<u8>)>) {
+    if found.is_empty() {
+        return;
+    }
+    let mut by_seg: Vec<Vec<String>> = vec![Vec::new(); ex.segments.len() + 1];
+    for (page, bytes) in found {
+        ex.inline_images.push(bytes);
+        let m = super::images::marker(&format!("#{}", ex.inline_images.len() - 1), None);
+        let i = ex.segments.iter().position(|s| s.from <= page && page <= s.to).unwrap_or(ex.segments.len());
+        by_seg[i].push(m);
+    }
+    let src = std::mem::take(&mut ex.content);
+    let mut out = String::with_capacity(src.len() + 64);
+    let mut segs = ex.segments.clone();
+    for (i, seg) in ex.segments.iter().enumerate() {
+        let end = ex.segments.get(i + 1).map_or(src.len(), |n| n.start);
+        segs[i].start = out.len();
+        out.push_str(src[seg.start..end].trim_end());
+        for m in &by_seg[i] {
+            out.push_str("\n\n");
+            out.push_str(m);
+        }
+        out.push_str("\n\n");
+    }
+    if ex.segments.is_empty() {
+        out.push_str(src.trim_end());
+        out.push_str("\n\n");
+    }
+    for m in &by_seg[ex.segments.len()] {
+        out.push_str(m);
+        out.push_str("\n\n");
+    }
+    ex.segments = segs;
+    ex.content = out;
 }
 
 #[cfg(feature = "pdf-render")]

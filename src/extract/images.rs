@@ -63,6 +63,7 @@ pub fn sniff(b: &[u8]) -> Option<&'static str> {
         [b'B', b'M', ..] => "bmp",
         [b'I', b'I', 0x2A, 0x00, ..] | [b'M', b'M', 0x00, 0x2A, ..] => "tif",
         [0xD7, 0xCD, 0xC6, 0x9A, ..] => "wmf",
+        [0, 0, 0, 0x0C, b'j', b'P', b' ', b' ', ..] | [0xFF, 0x4F, 0xFF, 0x51, ..] => "jp2",
         _ if b.len() > 44 && &b[40..44] == b" EMF" => "emf",
         _ if text.contains("<svg") => "svg",
         _ => return None,

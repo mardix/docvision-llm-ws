@@ -357,3 +357,59 @@ pub fn epub_with_picture() -> Vec<u8> {
         ("OEBPS/images/cover.png", picture(500, 700, 4)),
     ])
 }
+
+/// 3-page PDF with native text; page 1 has a raw RGB image (Flate), page 2 a JPEG used twice
+/// (also on page 3), and page 3 a fax-encoded image that isn't extracted.
+#[cfg(feature = "pdf-native")]
+pub fn pdf_with_images() -> Vec<u8> {
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Document, Object, Stream, dictionary};
+    use std::io::Write;
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let font = doc.add_object(dictionary! {"Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"});
+    let raw: Vec<u8> = (0..60 * 40 * 3).map(|i| (i % 251) as u8).collect();
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&raw).unwrap();
+    let rgb = doc.add_object(Stream::new(
+        dictionary! {"Type" => "XObject", "Subtype" => "Image", "Width" => 60, "Height" => 40, "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8, "Filter" => "FlateDecode"},
+        z.finish().unwrap(),
+    ));
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+    jpeg.resize(1200, 3);
+    let jpg = doc.add_object(Stream::new(
+        dictionary! {"Type" => "XObject", "Subtype" => "Image", "Width" => 300, "Height" => 200, "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8, "Filter" => "DCTDecode"},
+        jpeg,
+    ));
+    let fax = doc.add_object(Stream::new(
+        dictionary! {"Type" => "XObject", "Subtype" => "Image", "Width" => 100, "Height" => 100, "ColorSpace" => "DeviceGray", "BitsPerComponent" => 1, "Filter" => "CCITTFaxDecode"},
+        vec![0u8; 64],
+    ));
+    let mut kids = Vec::new();
+    for (p, xobjects) in [(1, dictionary! {"Im1" => rgb}), (2, dictionary! {"Im2" => jpg}), (3, dictionary! {"Im2" => jpg, "Im3" => fax})] {
+        let ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 12.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            // Enough text that a page with a picture still counts as a text page (not a scan).
+            Operation::new(
+                "Tj",
+                vec![Object::string_literal(format!(
+                    "This is native text on page {p} with plenty of words to count. {}",
+                    "Quarterly results were strong across every region and product line. ".repeat(4)
+                ))],
+            ),
+            Operation::new("ET", vec![]),
+        ];
+        let cid = doc.add_object(Stream::new(dictionary! {}, Content { operations: ops }.encode().unwrap()));
+        let resources = dictionary! {"Font" => dictionary! {"F1" => font}, "XObject" => xobjects};
+        let page = doc.add_object(dictionary! {"Type" => "Page", "Parent" => pages_id, "Contents" => cid, "Resources" => resources, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()]});
+        kids.push(page.into());
+    }
+    doc.objects.insert(pages_id, Object::Dictionary(dictionary! {"Type" => "Pages", "Kids" => kids, "Count" => 3}));
+    let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});
+    doc.trailer.set("Root", catalog);
+    let mut out = Vec::new();
+    doc.save_to(&mut out).unwrap();
+    out
+}

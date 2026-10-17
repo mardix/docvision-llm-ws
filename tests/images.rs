@@ -132,3 +132,41 @@ async fn destination_gets_an_images_folder_and_cache_hits_keep_them() {
     assert_eq!(v["data"]["cache_hit"], false);
     assert!(s.dir.join("images").join(&file).exists(), "stored again");
 }
+
+#[cfg(feature = "pdf-native")]
+#[tokio::test]
+async fn pdf_images_per_page() {
+    let s = server().await;
+    let p = s.write("scan.pdf", &fixtures::pdf_with_images());
+    // Native text (ocr off), so placement is per page.
+    let (st, v) =
+        s.convert_sync(&p, json!({"extract_images": true, "ocr": "off", "title_method": "local", "summary_method": "local"})).await;
+    assert_eq!(st, 200, "{v}");
+    let d = &v["data"];
+    let images = d["images"].as_array().unwrap();
+    assert_eq!(images.len(), 2, "RGB + JPEG (the repeat kept once, fax skipped): {images:?}");
+    let png = images.iter().find(|i| i["format"] == "png").unwrap();
+    assert_eq!((png["width"].as_u64(), png["height"].as_u64(), png["location"].as_str()), (Some(60), Some(40), Some("page 1")));
+    let jpg = images.iter().find(|i| i["format"] == "jpg").unwrap();
+    assert_eq!(jpg["location"], "page 2");
+    let c = d["content"].as_str().unwrap();
+    let (p1, p2, p3) = (c.find("page 1 with").unwrap(), c.find("page 2 with").unwrap(), c.find("page 3 with").unwrap());
+    let png_at = c.find(png["path"].as_str().unwrap()).unwrap();
+    assert!(p1 < png_at && png_at < p2, "the page-1 image follows page 1's text: {c}");
+    let jpg_refs: Vec<usize> = c.match_indices(jpg["path"].as_str().unwrap()).map(|(i, _)| i).collect();
+    assert_eq!(jpg_refs.len(), 2, "{c}");
+    assert!(p2 < jpg_refs[0] && jpg_refs[0] < p3 && p3 < jpg_refs[1], "{c}");
+    assert!(d["warnings"].to_string().contains("1 PDF image(s) use an encoding that is not extracted"), "{}", d["warnings"]);
+    // The PNG rebuilt from raw pixels is a valid file of the right size.
+    let file = png["path"].as_str().unwrap().trim_start_matches("images/");
+    let b = std::fs::read(s.dir.join("images").join(file)).unwrap();
+    assert!(b.starts_with(b"\x89PNG\r\n\x1a\n"));
+    // Pages are segments, so chunks still point at the right pages.
+    assert_eq!(d["chunks"][0]["source_span"]["kind"], "page");
+
+    // With the LLM transcribing (ocr on) the images come along too.
+    let (st, v) = s.convert_sync(&p, json!({"extract_images": true, "gen_title": false, "gen_summary": false})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["data"]["images"].as_array().unwrap().len(), 2);
+    assert!(v["data"]["content"].as_str().unwrap().contains("](images/"));
+}

@@ -453,7 +453,8 @@ Revenue grew 12% this quarter.
   ]
   ```
 
-- **Not covered yet:** PDFs, charts stored as chart data rather than pictures, and images linked from other servers.
+- **PDFs** (with the `pdf-native` feature): images drawn directly on a page are extracted. JPEG and JPEG 2000 images are kept as they are; 8-bit RGB or grayscale images are saved as PNG. Each image is placed at the end of the text for its page (or for the batch of pages it was read in). Fax (CCITT) and JBIG2 images, and images nested inside forms or patterns, are skipped with a warning. Pages that are mostly a picture are still treated as scans and sent for OCR.
+- **Not covered yet:** charts stored as chart data rather than pictures, and images linked from other servers.
 
 <br>
 
