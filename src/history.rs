@@ -100,6 +100,8 @@ fn item(r: &sqlx::any::AnyRow) -> Value {
         "md_bytes": files.get("md_bytes"),
         "docv_file": files.get("docv_file"),
         "docv_bytes": files.get("docv_bytes"),
+        "zip_file": files.get("zip_file"),
+        "zip_bytes": files.get("zip_bytes"),
         "request_status": s("request_status"),
         "execution_status": s("execution_status"),
         "execution_stage": s("execution_stage"),
