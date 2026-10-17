@@ -67,3 +67,48 @@ The `anthropic` provider sends PDFs and images inline (base64), which covers pie
 - **Prompt caching.** The fixed instructions are far below the minimum cacheable size today. Worth revisiting if prompts grow, or for repeated extraction against the same schema.
 - **Refusal fallback.** When Claude declines a document the request fails with the reason. Anthropic offers server-side fallback to another model for the newest models; it is a beta feature and was left out.
 - **Effort as an option.** Effort is fixed (low for transcription and summaries, medium for extraction). It could become a request option if quality on hard scans needs it.
+
+<br>
+
+## Zip
+
+`create_zip`, `zip_only` and `job.zip` are built (v0.4.0). Left out:
+
+### 1. Rewrite the destination's JSON result after `job.zip`
+
+- **What:** when `job.zip` builds a zip later, update `zip_bytes` in the `.docv.json` at the destination (and the local result file), not just in `job.get` and the webhook.
+- **Why:** today the destination's JSON still says `zip_bytes: 0`, so anyone who reads only the destination files can't tell the zip exists.
+- **Notes:** `docv_bytes` is self-referential, so the file has to be rewritten until its size is stable, as at conversion time. With `overwrite: false` the rewrite would conflict with the existing file.
+
+### 2. Resume `zip.*` webhooks after a restart
+
+- **What:** pending `zip.completed` / `zip.failed` deliveries are retried after a restart, as `job.finished` deliveries are.
+- **Why:** a restart during the retry window drops the event. The workaround is to call `job.zip` again, which replies at once with the existing zip.
+- **Notes:** the zip event IDs end in `_zip-completed`, so `resume` skips them today. It would need the event kind stored, or parsed back from the ID, and the zip state from `<job_id>.zip.json`.
+
+### 3. Body templates for zip events
+
+- **What:** let `webhook.body` (or a separate `zip_body`) shape the `zip.*` events.
+- **Why:** receivers built around a custom `job.finished` template get zip events in the fixed shape.
+
+### 4. Update history when `job.zip` builds a zip
+
+- **What:** record the new `zip_bytes` on the request's history entry.
+- **Why:** history (and the dashboard's request details) only shows zips made during conversion; a later zip shows as "—".
+
+### 5. Optional compression
+
+- **What:** e.g. `"zip_compression": "deflate"`.
+- **Why:** entries are stored uncompressed because pictures barely shrink. A zip that is mostly text (long Markdown, few or no images) would shrink about 4–5×.
+
+### Decided against
+
+- **Zips for sync conversions.** A sync conversion has no job to keep the zip with, so `create_zip` and `zip_only` require async.
+
+<br>
+
+## Input formats
+
+### Decided against
+
+- **HEIC / HEIF (iPhone photos).** There is no reliable pure-Rust decoder: support would need the system `libheif` (LGPL, plus an HEVC decoder with patent questions), or sending HEIC only to Gemini, which accepts it natively. Callers convert to PNG, JPEG or WebP instead; HEIC returns `415 unsupported_format`.
