@@ -123,6 +123,46 @@ pub fn schedule(
     let _ = (app, job_id, request_id, spec, index, result_path, start_attempt);
 }
 
+/// Send a later event about a job (`zip.completed`, `zip.failed`) to one of its webhooks:
+/// `{event_id, event, job_id, request_id, ...data}`, signed and retried like `job.finished`.
+/// Body templates apply only to `job.finished`.
+pub fn schedule_event(
+    app: Arc<App>,
+    job_id: String,
+    request_id: String,
+    spec: WebhookSpec,
+    index: usize,
+    event: &'static str,
+    data: Value,
+) {
+    #[cfg(feature = "webhooks")]
+    tokio::spawn(async move {
+        use crate::db::{WebhookRow, WriteOp, now_ms};
+        // Its own ID (not resumed after a restart: `job.zip` can simply be asked again).
+        let eid = format!("{}_{}", event_id(&job_id, index), event.replace('.', "-"));
+        let mut body = serde_json::json!({"event_id": eid, "event": event, "job_id": job_id, "request_id": request_id});
+        if let (Some(b), Value::Object(d)) = (body.as_object_mut(), data) {
+            b.extend(d);
+        }
+        let row = WebhookRow {
+            event_id: eid.clone(),
+            job_id: job_id.clone(),
+            status: "pending".into(),
+            attempts: 0,
+            last_http_status: None,
+            last_error: None,
+            next_attempt_at: Some(now_ms()),
+            created_at: now_ms(),
+            delivered_at: None,
+        };
+        app.writer.send(WriteOp::Webhook(row.clone()));
+        let payload = Payload::Bytes(serde_json::to_vec(&body).unwrap_or_default().into());
+        attempts(&app, &job_id, &spec, &eid, row, payload, 0).await;
+    });
+    #[cfg(not(feature = "webhooks"))]
+    let _ = (app, job_id, request_id, spec, index, event, data);
+}
+
 #[cfg_attr(not(feature = "webhooks"), allow(dead_code))]
 /// A placeholder is `"$"` (the whole result) or `"$.path"`; `"$$..."` escapes a literal `$`.
 fn placeholder(s: &str) -> Option<&str> {
@@ -192,6 +232,9 @@ async fn body_for(app: &App, eid: &str, job_id: &str, request_id: &str, spec: &W
             "md_bytes",
             "docv_file",
             "docv_bytes",
+            "images_dir",
+            "zip_file",
+            "zip_bytes",
             "metadata",
             "statistics",
             "llm",
@@ -216,6 +259,9 @@ async fn body_for(app: &App, eid: &str, job_id: &str, request_id: &str, spec: &W
             "md_bytes": m.remove("md_bytes"),
             "docv_file": m.remove("docv_file"),
             "docv_bytes": m.remove("docv_bytes"),
+            "images_dir": m.remove("images_dir"),
+            "zip_file": m.remove("zip_file"),
+            "zip_bytes": m.remove("zip_bytes"),
             "metadata": m.remove("metadata"),
             "statistics": m.remove("statistics"),
             "llm": totals,
@@ -274,6 +320,21 @@ async fn deliver(app: Arc<App>, job_id: String, request_id: String, spec: Webhoo
         app.writer.send(WriteOp::Webhook(row));
         return;
     };
+    attempts(&app, &job_id, &spec, &eid, row, payload, start_attempt).await;
+}
+
+/// Deliver one payload with the retry schedule, recording each attempt.
+#[cfg(feature = "webhooks")]
+async fn attempts(
+    app: &App,
+    job_id: &str,
+    spec: &WebhookSpec,
+    eid: &str,
+    mut row: crate::db::WebhookRow,
+    payload: Payload,
+    start_attempt: usize,
+) {
+    use crate::db::{WriteOp, now_ms};
     let client = crate::source::http_client();
     for (attempt, &wait) in SCHEDULE.iter().enumerate().skip(start_attempt) {
         if wait > 0 {
@@ -287,7 +348,7 @@ async fn deliver(app: Arc<App>, job_id: String, request_id: String, spec: Webhoo
         for (k, v) in &spec.headers {
             rb = rb.header(k, v);
         }
-        rb = rb.header("content-type", "application/json").header("x-docvision-event-id", &eid).header("x-docvision-timestamp", &ts);
+        rb = rb.header("content-type", "application/json").header("x-docvision-event-id", eid).header("x-docvision-timestamp", &ts);
         if let Some(secret) = &spec.secret {
             let sig = match &payload {
                 Payload::Bytes(b) => Some(sign(secret, &ts, b)),

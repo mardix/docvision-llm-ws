@@ -75,6 +75,7 @@ Requests can override any of these with the `llm_*` options.
 | `GET /_/dashboard` | token, entered in the page | Dashboard: live activity, in-progress requests, paginated request history and failures (filter by requester, operation, format, status) with file paths and sizes, and forms to run `convert`, `summarize`, `chunk` and `extract` |
 | `GET /_/doc` | none | This README as a web page |
 | `GET /_/images/{file}` | token | An extracted image, by the file name listed in a result's `images` |
+| `GET /_/jobs/{job_id}/zip` | token | The zip of a job without a destination (see [Zip](#zip)) |
 | `GET /_/db` | token | Download a snapshot of the SQLite database (the dashboard has a button for it). `404` when the database is PostgreSQL |
 | `GET /metrics` | token | Prometheus metrics |
 | `GET /livez` | none | `200 ok` while the process is up |
@@ -121,6 +122,7 @@ On failure, `ok` is `false` and the error looks like `{"code": "…", "message":
 | `extract` | Structured JSON from text, following a JSON Schema |
 | `job.get` | A job's state and result |
 | `job.wait` | Wait until a job changes state |
+| `job.zip` | Build the zip for a finished job |
 | `history.list` | Past requests, newest first |
 | `history.get` | One request with its events and LLM calls |
 | `stats` | Activity summary (what the dashboard shows) |
@@ -211,6 +213,8 @@ All options are optional, and all are top-level keys in `options`.
 | `cache` | `use` | `use`, `bypass`, `refresh` |
 | `allow_partial` | `false` | Accept partial extraction (`status: "partial"`) |
 | `overwrite` | `true` | Replace existing destination files. `false` fails the job with `409 destination_exists` instead |
+| `create_zip` | `false` | Also write a zip with the Markdown, `summary.md` and the images. Async only. See [Zip](#zip) |
+| `zip_only` | `false` | Write only the zip and the JSON result to the destination, not the separate `.md` and `images/`. Turns on `create_zip` |
 
 **PDF and images**
 
@@ -321,6 +325,9 @@ See [Structured extraction](#structured-extraction) for how it works.
   "md_bytes": 20117,
   "docv_file": "s3://bucket/out/report.pdf.docv.json",
   "docv_bytes": 48213,
+  "images_dir": "s3://bucket/out/images/",
+  "zip_file": "s3://bucket/out/report.pdf.zip",
+  "zip_bytes": 0,
   "metadata": {
     "ref": "abc-123"
   },
@@ -405,6 +412,10 @@ See [Structured extraction](#structured-extraction) for how it works.
   | `md_file` | Where the Markdown was written | no destination, or writing failed |
   | `md_bytes` | Size of the Markdown (the `content` field) | the conversion failed |
   | `docv_file`, `docv_bytes` | Where the JSON result was written, and its exact size | no destination, or writing failed |
+  | `images_dir` | Where extracted images were written | no destination, no images, or `zip_only` |
+  | `zip_file`, `zip_bytes` | Where the zip is, or will be once `job.zip` builds it. `zip_bytes` is `0` until it exists | `zip_file`: sync conversions (`zip_bytes` is then `0`) |
+
+  With `zip_only`, `md_file` keeps its path and `md_bytes` is `0`: a size of `0` means the file was not written.
 - `extracted` holds the structured data when `extract_schema` was given (see below), otherwise `null`.
 - `feature_status` reports each optional feature (`title`, `summary`, `chunks`, `language`, `translation`, `extraction`) as `completed`, `failed`, `skipped` or `disabled`, with the method used and any error.
 - `llm.calls` has one record per attempt (provider, model, status, tokens, duration), including retries and failures.
@@ -455,6 +466,41 @@ Revenue grew 12% this quarter.
 
 - **PDFs** (with the `pdf-native` feature): images drawn directly on a page are extracted. JPEG and JPEG 2000 images are kept as they are; 8-bit RGB or grayscale images are saved as PNG. Each image is placed at the end of the text for its page (or for the batch of pages it was read in). Fax (CCITT) and JBIG2 images, and images nested inside forms or patterns, are skipped with a warning. Pages that are mostly a picture are still treated as scans and sent for OCR.
 - **Not covered yet:** charts stored as chart data rather than pictures, and images linked from other servers.
+
+<br>
+
+### Zip
+
+A zip holds the whole document in one file, ready to unpack and open:
+
+```
+report.pdf.zip
+├── report.pdf.md         the Markdown
+├── summary.md            only when a summary was made
+├── report.pdf.fr.md      the translation, with translate_to
+└── images/…              the extracted images (extract_images)
+```
+
+The Markdown's `images/…` links work once it is unpacked. Files are stored without compression (pictures barely shrink), so the zip is quick to build.
+
+**When converting:** `"create_zip": true` (async jobs). The zip is written next to the Markdown (`report.pdf.zip`), or, without a destination, kept with the job and downloaded with `GET /_/jobs/{job_id}/zip`. Add `"zip_only": true` to write only the zip and the JSON result, without the separate `.md` and `images/`.
+
+**Later:** every async result carries `zip_file` (where the zip is or will be) and `zip_bytes` (`0` until it exists). To make it afterwards:
+
+```json
+{
+  "operation": "job.zip",
+  "payload": {"job_id": "01a10e96-…"}
+}
+```
+
+- Replies `202` with `{"status": "running", "zip_file": …, "zip_bytes": 0}` and builds the zip from the stored result and images. No LLM work is repeated.
+- When it is done, each of the job's webhooks gets a `zip.completed` event (`zip.failed` if it could not be built) with `job_id`, `request_id`, `zip_file`, `zip_bytes` and `error`.
+- `job.get` and `job.wait` show the same in `zip` (`null` when no zip was asked for).
+- Asking again once the zip exists replies `200` with its size. Two requests at once build it only once.
+- The job must have finished (`409 job_not_finished` / `409 job_failed`), and its result and images must still be stored (`410 expired` / `410 images_expired`; they are kept for `DOCVISION_RESULT_RETENTION`).
+- It contains what the job produced: no summary means no `summary.md`, and images only if `extract_images` was on.
+- A later zip only adds the file; it never removes the `.md` or `images/` already written. The JSON result at the destination is not rewritten, so it still shows `zip_bytes: 0`; use `job.get` or the webhook for the size.
 
 <br>
 
@@ -612,7 +658,7 @@ The result keeps `content` (the Markdown) and adds:
 }
 ```
 
-- Returns `job_id`, `request_id`, `status` (`queued`, `running`, `completed`, `partial`, `failed`), timestamps, `error`, `webhooks` (delivery status) and `result`.
+- Returns `job_id`, `request_id`, `status` (`queued`, `running`, `completed`, `partial`, `failed`), timestamps, `error`, `zip` (see [Zip](#zip)), `webhooks` (delivery status) and `result`.
 - `result` is `null` until the job is done.
 - `fields` limits the result to those top-level fields.
 
@@ -757,7 +803,9 @@ Called after an async job finishes (`webhooks` feature). `payload.webhook` is on
 | `"$$text"` | The literal string `"$text"` |
 | anything else | Sent unchanged |
 
-Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_id`, `status`, the file fields (`src_file`, `src_bytes`, `dest_file`, `md_file`, `md_bytes`, `docv_file`, `docv_bytes`), `metadata`, `statistics`, `llm` (totals), `timing` and `error`. It never includes the content, so the receiver can use the paths and sizes to decide what to fetch.
+Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_id`, `status`, the file fields (`src_file`, `src_bytes`, `dest_file`, `md_file`, `md_bytes`, `docv_file`, `docv_bytes`, `images_dir`, `zip_file`, `zip_bytes`), `metadata`, `statistics`, `llm` (totals), `timing` and `error`. It never includes the content, so the receiver can use the paths and sizes to decide what to fetch.
+
+**Zip events:** after `job.zip`, a `zip.completed` or `zip.failed` event (`event_id`, `event`, `job_id`, `request_id`, `status`, `zip_file`, `zip_bytes`, `error`) is sent to the same endpoints, signed and retried the same way, with its own `event_id`. `body` templates apply only to `job.finished`.
 
 **Headers sent**
 

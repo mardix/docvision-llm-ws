@@ -46,6 +46,8 @@ pub struct JobMsg(pub Arc<JobSpec>);
 pub struct Jobs {
     watchers: DashMap<String, watch::Sender<&'static str>>,
     terminal: DashMap<String, Arc<JobRow>>,
+    /// Jobs whose zip is being built by `job.zip` (one build per job at a time).
+    zipping: DashMap<String, ()>,
 }
 
 const TERMINAL_CACHE_MAX: usize = 10_000;
@@ -164,6 +166,124 @@ fn md_bytes(body: Option<&BodyRef>) -> Option<u64> {
         BodyRef::Owned(b) => Some(b.content.len() as u64),
         raw => raw.fields(&["statistics"]).get("statistics")?.get("content_bytes")?.as_u64(),
     }
+}
+
+// ---------------------------------------------------------------- zip
+
+/// Where a job's zip is built, and where it is reported (`zip_file`): next to the Markdown for a
+/// destination (built in staging, then copied), otherwise kept with the job and served from
+/// `/_/jobs/{job_id}/zip`.
+fn zip_location(app: &App, job_id: &str, dest: Option<&result::Dest>) -> (PathBuf, Option<String>) {
+    match dest {
+        Some(d) => (app.staging_dir().join(format!("{job_id}.zip")), Some(d.zip_display())),
+        None => (app.results_dir().join(format!("{job_id}.zip")), Some(format!("/_/jobs/{job_id}/zip"))),
+    }
+}
+
+/// Zip state of a job, kept next to its result (`<job_id>.zip.json`) and shown by `job.get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZipInfo {
+    /// `running`, `completed` or `failed`.
+    pub status: String,
+    pub zip_file: Option<String>,
+    pub zip_bytes: u64,
+    pub error: Option<Value>,
+}
+
+impl ZipInfo {
+    fn completed(zip_file: Option<String>, zip_bytes: u64) -> ZipInfo {
+        ZipInfo { status: "completed".into(), zip_file, zip_bytes, error: None }
+    }
+}
+
+fn zip_info_path(app: &App, job_id: &str) -> PathBuf {
+    app.results_dir().join(format!("{job_id}.zip.json"))
+}
+
+async fn write_zip_info(app: &App, job_id: &str, info: &ZipInfo) {
+    let path = zip_info_path(app, job_id);
+    let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::now_v7()));
+    let ok = match serde_json::to_vec(info) {
+        Ok(b) => tokio::fs::write(&tmp, b).await.is_ok() && tokio::fs::rename(&tmp, &path).await.is_ok(),
+        Err(_) => false,
+    };
+    if !ok {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        tracing::warn!(target: "docvision_llm_ws::jobs", job_id, "could not record zip state");
+    }
+}
+
+async fn read_zip_info(app: &App, job_id: &str) -> Option<ZipInfo> {
+    let b = tokio::fs::read(zip_info_path(app, job_id)).await.ok()?;
+    serde_json::from_slice(&b).ok()
+}
+
+/// Build a zip from result fields (`content`, `summary`, `translated_content`,
+/// `translated_language`). Returns the built file and its size.
+async fn write_zip_from(
+    app: &App,
+    out: PathBuf,
+    name: String,
+    mut m: serde_json::Map<String, Value>,
+    images: Vec<(PathBuf, String)>,
+) -> Result<(PathBuf, u64), AppError> {
+    let r = app
+        .cpu
+        .run(move || {
+            let text = |m: &mut serde_json::Map<String, Value>, k: &str| match m.remove(k) {
+                Some(Value::String(s)) => Some(s),
+                _ => None,
+            };
+            let content = text(&mut m, "content").unwrap_or_default();
+            let summary = text(&mut m, "summary");
+            let (tc, tl) = (text(&mut m, "translated_content"), text(&mut m, "translated_language"));
+            let parts = result::ZipParts {
+                name: &name,
+                content: &content,
+                summary: summary.as_deref(),
+                translated: tl.as_deref().zip(tc.as_deref()),
+                images: &images,
+            };
+            result::write_zip(&out, &parts).map(|n| (out, n))
+        })
+        .await
+        .map_err(cpu_err)?;
+    r.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::new(410, "images_expired", "an extracted image is no longer stored; convert the document again").stage("storage")
+        } else {
+            AppError::internal(format!("cannot write zip: {}", e.kind())).stage("storage")
+        }
+    })
+}
+
+const ZIP_FIELDS: [&str; 4] = ["content", "summary", "translated_content", "translated_language"];
+
+/// Build the zip for a conversion that just finished.
+async fn build_zip(
+    app: &App,
+    job_id: &str,
+    source: &str,
+    dest: Option<&result::Dest>,
+    body: &BodyRef,
+    images: &[(PathBuf, String)],
+) -> Result<(PathBuf, u64), AppError> {
+    let m = match body {
+        BodyRef::Owned(b) => {
+            let mut m = serde_json::Map::new();
+            m.insert("content".into(), b.content.clone().into());
+            for (k, v) in
+                [("summary", &b.summary), ("translated_content", &b.translated_content), ("translated_language", &b.translated_language)]
+            {
+                if let Some(v) = v {
+                    m.insert(k.into(), v.clone().into());
+                }
+            }
+            m
+        }
+        raw => raw.fields(&ZIP_FIELDS),
+    };
+    write_zip_from(app, zip_location(app, job_id, dest).0, result::zip_name(dest, source), m, images.to_vec()).await
 }
 
 // ---------------------------------------------------------------- helpers
@@ -587,6 +707,8 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
         docv_file: None,
         docv_bytes: None,
         images_dir: None,
+        zip_file: None,
+        zip_bytes: 0,
         metadata: spec.payload.metadata.as_ref(),
     };
     let empty = Body::default();
@@ -969,7 +1091,9 @@ async fn finalize_async(
         .iter()
         .map(|m| (app.images_dir().join(m.file_name()), m.file_name().to_string()))
         .collect();
-    let images_shown = dest.as_ref().filter(|_| !image_files.is_empty()).map(|d| d.images_display());
+    let zip_only = spec.options.zip_only && dest.is_some();
+    let images_shown = dest.as_ref().filter(|_| !image_files.is_empty() && !zip_only).map(|d| d.images_display());
+    let zip_shown = zip_location(app, &job_id, dest.as_ref()).1;
     let llm = if cache_hit { LlmSection::default() } else { acct.section() };
     let empty = Arc::new(Body::default());
     let body_ref = body.clone().unwrap_or(BodyRef::Owned(empty));
@@ -983,6 +1107,19 @@ async fn finalize_async(
     };
     let md = if err.is_none() { content_for_md() } else { None };
 
+    // The zip is built before the result is written, so the result can carry its size.
+    let mut zip_built: Option<(PathBuf, u64)> = None;
+    if err.is_none() && spec.options.wants_zip() {
+        match build_zip(app, &job_id, &spec.payload.source, dest.as_ref(), &body_ref, &image_files).await {
+            Ok(z) => zip_built = Some(z),
+            Err(e) => {
+                status = "failed";
+                err = Some(e);
+            }
+        }
+    }
+    let zip_size = zip_built.as_ref().map_or(0, |z| z.1);
+
     // Timing is fixed once so repeated writes (self-referential sizes) are byte-stable.
     let fixed_timing = timing_for(acct, body.as_ref(), fetch_ms, queue_ms, started, 0);
     // `published`: where the Markdown and JSON go, plus the JSON's size (it contains itself).
@@ -995,6 +1132,8 @@ async fn finalize_async(
         }
         let dest_s = spec.payload.destination.as_deref().map(source::sanitize);
         let images_s = images_shown.clone();
+        let zip_s = zip_shown.clone();
+        let err_none = err.is_none();
         let eb = err.map(|e| e.body());
         let cpu = app2.cpu.clone();
         async move {
@@ -1010,10 +1149,12 @@ async fn finalize_async(
                         src_bytes,
                         dest_file: dest_s.as_deref(),
                         md_file: published.as_ref().map(|p| p.0.as_str()),
-                        md_bytes: md_size,
+                        md_bytes: if zip_only && published.is_some() { Some(0) } else { md_size },
                         docv_file: published.as_ref().map(|p| p.1.as_str()),
                         docv_bytes: published.as_ref().map(|p| p.2),
                         images_dir: published.as_ref().and(images_s.as_deref()),
+                        zip_file: zip_s.as_deref(),
+                        zip_bytes: if err_none { zip_size } else { 0 },
                         metadata: spec2.payload.metadata.as_ref(),
                     };
                     let t = Trailer { error: eb.as_ref(), llm: &llm2, timing: &timing };
@@ -1049,7 +1190,16 @@ async fn finalize_async(
     };
     if let (Ok(_), Some(d)) = (&written, &dest)
         && err.is_none()
-        && let Err(e) = result::publish(d, &path, md.as_deref().unwrap_or(""), spec.options.overwrite, &image_files).await
+        && let Err(e) = result::publish(
+            d,
+            &path,
+            md.as_deref().unwrap_or(""),
+            spec.options.overwrite,
+            &image_files,
+            zip_built.as_ref().map(|z| z.0.as_path()),
+            zip_only,
+        )
+        .await
     {
         // Never claim a destination was written when storage failed.
         status = "failed";
@@ -1062,6 +1212,16 @@ async fn finalize_async(
         let _ = write(status, None, Some(e)).await;
     }
     let ((bs, be, size), timing) = written.unwrap_or(((0, 0, 0), Timing::default()));
+    let zip_size = if err.is_none() { zip_size } else { 0 };
+    if let Some((zp, n)) = &zip_built {
+        if dest.is_some() {
+            // Built in staging; the destination now has its copy.
+            let _ = tokio::fs::remove_file(zp).await;
+        }
+        if err.is_none() {
+            write_zip_info(app, &job_id, &ZipInfo::completed(zip_shown.clone(), *n)).await;
+        }
+    }
     // An empty result is never cached: it may be a model hiccup, and caching would make it stick.
     if status != "failed"
         && leader
@@ -1085,9 +1245,11 @@ async fn finalize_async(
         "src_bytes": src_bytes,
         "dest_file": spec.payload.destination.as_deref().map(source::sanitize),
         "md_file": published.map(|d| d.display()),
-        "md_bytes": md_size,
+        "md_bytes": if zip_only && published.is_some() { Some(0) } else { md_size },
         "docv_file": published.map(|d| d.json_display()),
         "docv_bytes": published.map(|_| size),
+        "zip_file": zip_shown,
+        "zip_bytes": zip_size,
     });
     let error_json = err.as_ref().map(|e| serde_json::to_string(&e.body()).unwrap_or_default());
     // The terminal state is committed before it is announced (job.wait) or delivered (webhook).
@@ -1227,6 +1389,9 @@ async fn job_info(app: &App, row: &JobRow) -> serde_json::Map<String, Value> {
     m.insert("started_at".into(), row.started_at.map(rfc3339).into());
     m.insert("finished_at".into(), row.finished_at.map(rfc3339).into());
     m.insert("error".into(), parse_err(&row.error));
+    // Zip state (`job.zip` or `create_zip`); `null` when no zip was asked for.
+    let zip = read_zip_info(app, &row.job_id).await;
+    m.insert("zip".into(), zip.and_then(|z| serde_json::to_value(z).ok()).unwrap_or(Value::Null));
     #[cfg(feature = "webhooks")]
     {
         // Only jobs submitted with a webhook pay for the second query.
@@ -1314,6 +1479,89 @@ pub async fn job_get(app: &Arc<App>, ctx: &ReqCtx, payload: Value) -> Result<Res
             r.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
             Ok(r)
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobZip {
+    job_id: String,
+}
+
+/// `job.zip`: build the zip for a finished job from its stored result and images (no LLM work).
+/// Replies `202` while it is built, then a `zip.completed` (or `zip.failed`) webhook is sent;
+/// a zip that already exists is reported straight away with `200`.
+pub async fn job_zip(app: &Arc<App>, ctx: &ReqCtx, payload: Value) -> Result<Response, AppError> {
+    let p: JobZip = typed(payload, "payload")?;
+    let row = app.db.get_job(&p.job_id).await.map_err(db_err)?.ok_or_else(|| AppError::new(404, "job_not_found", "unknown job_id"))?;
+    match row.state.as_str() {
+        "completed" | "partial" => {}
+        "failed" => return Err(AppError::new(409, "job_failed", "the job failed, so there is nothing to zip")),
+        _ => return Err(AppError::new(409, "job_not_finished", "the job has not finished yet; ask again once it has").retry_after(5)),
+    }
+    let gone = || AppError::new(410, "expired", "the job's result is no longer stored; convert the document again");
+    let path = row.result_path.clone().map(PathBuf::from).ok_or_else(gone)?;
+    if tokio::fs::metadata(&path).await.is_err() {
+        return Err(gone());
+    }
+    let stored = stored_job(app, &row).ok_or_else(gone)?;
+    let dest = stored.payload.destination.as_deref().and_then(|d| result::parse_dest(d, &stored.payload.source).ok());
+    let (zip_path, shown) = zip_location(app, &row.job_id, dest.as_ref());
+    if let Some(info) = read_zip_info(app, &row.job_id).await
+        && info.status == "completed"
+        && (dest.is_some() || tokio::fs::metadata(&zip_path).await.is_ok())
+    {
+        return Ok(crate::rpc::ok("job.zip", &ctx.request_id, 200, &info));
+    }
+    let running = ZipInfo { status: "running".into(), zip_file: shown, zip_bytes: 0, error: None };
+    if app.jobs.zipping.insert(row.job_id.clone(), ()).is_some() {
+        return Ok(crate::rpc::ok("job.zip", &ctx.request_id, 202, &running));
+    }
+    write_zip_info(app, &row.job_id, &running).await;
+    tokio::spawn(make_zip(app.clone(), row, stored, dest, path, running.zip_file.clone()));
+    Ok(crate::rpc::ok("job.zip", &ctx.request_id, 202, &running))
+}
+
+/// Clears the job's "zip in progress" mark however the build ends.
+struct Zipping(Arc<App>, String);
+
+impl Drop for Zipping {
+    fn drop(&mut self) {
+        self.0.jobs.zipping.remove(&self.1);
+    }
+}
+
+async fn make_zip(app: Arc<App>, row: JobRow, stored: StoredJob, dest: Option<result::Dest>, path: PathBuf, shown: Option<String>) {
+    let _mark = Zipping(app.clone(), row.job_id.clone());
+    let work = async {
+        let fields: Vec<String> = ZIP_FIELDS.iter().chain(&["images"]).map(|s| s.to_string()).collect();
+        let mut m = app
+            .cpu
+            .run(move || select_fields(&path, &fields))
+            .await
+            .map_err(cpu_err)?
+            .map_err(|_| AppError::new(410, "expired", "the job's result is no longer stored"))?;
+        let metas: Vec<result::ImageMeta> = m.remove("images").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        let images = metas.iter().map(|i| (app.images_dir().join(i.file_name()), i.file_name().to_string())).collect();
+        let name = result::zip_name(dest.as_ref(), &stored.payload.source);
+        let (zp, n) = write_zip_from(&app, zip_location(&app, &row.job_id, dest.as_ref()).0, name, m, images).await?;
+        if let Some(d) = &dest {
+            let r = result::publish_zip(d, &zp, true).await;
+            let _ = tokio::fs::remove_file(&zp).await;
+            r?;
+        }
+        Ok::<_, AppError>(n)
+    };
+    let info = match work.await {
+        Ok(n) => ZipInfo::completed(shown, n),
+        Err(e) => ZipInfo { status: "failed".into(), zip_file: shown, zip_bytes: 0, error: serde_json::to_value(e.body()).ok() },
+    };
+    write_zip_info(&app, &row.job_id, &info).await;
+    tracing::info!(target: "docvision_llm_ws::jobs", job_id = %row.job_id, status = %info.status, zip_bytes = info.zip_bytes, "zip built");
+    let event = if info.status == "completed" { "zip.completed" } else { "zip.failed" };
+    let data = serde_json::to_value(&info).unwrap_or(Value::Null);
+    for (i, w) in stored.payload.webhooks().iter().enumerate() {
+        crate::webhook::schedule_event(app.clone(), row.job_id.clone(), row.request_id.clone(), w.clone(), i, event, data.clone());
     }
 }
 

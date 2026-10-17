@@ -126,6 +126,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/_/doc", get(doc::doc))
         .route("/_/db", get(rpc::db_download))
         .route("/_/images/{name}", get(rpc::image_file))
+        .route("/_/jobs/{job_id}/zip", get(rpc::zip_file))
         .layer(CompressionLayer::new().compress_when(SizeAbove::new(4096).and(NotForContentType::IMAGES)))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(body_cap))
         .with_state(app)

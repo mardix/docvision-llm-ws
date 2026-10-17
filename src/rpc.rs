@@ -229,6 +229,39 @@ pub async fn image_file(
     r
 }
 
+/// `GET /_/jobs/{job_id}/zip`: the zip of a job without a destination (token required).
+pub async fn zip_file(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Response {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let missing =
+        || (StatusCode::NOT_FOUND, "no zip for this job (create it with job.zip; zips are kept as long as results)").into_response();
+    if job_id.is_empty() || job_id.len() > 64 || !job_id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return missing();
+    }
+    let Ok(file) = tokio::fs::File::open(app.results_dir().join(format!("{job_id}.zip"))).await else { return missing() };
+    let Ok(len) = file.metadata().await.map(|m| m.len()) else { return missing() };
+    let name = match app.db.get_job(&job_id).await {
+        Ok(Some(row)) => crate::jobs::stored_job(&app, &row).map(|s| crate::result::zip_name(None, &s.payload.source)),
+        _ => None,
+    }
+    .unwrap_or_else(|| "document".into());
+    let mut r = Response::new(Body::from_stream(tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024)));
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let ascii: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' }).collect();
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{ascii}.zip\"")) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    r
+}
+
 /// `GET /_/db`: download a snapshot of the SQLite database (token required).
 pub async fn db_download(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if !authorized(&app, &headers) {
@@ -338,6 +371,7 @@ async fn dispatch(app: &Arc<App>, ctx: &mut ReqCtx, headers: &HeaderMap, body: &
         "extract" => crate::enrich::extract_op(app, ctx, env.payload, env.options).await,
         "job.get" => crate::jobs::job_get(app, ctx, env.payload).await,
         "job.wait" => crate::jobs::job_wait(app, ctx, env.payload).await,
+        "job.zip" => crate::jobs::job_zip(app, ctx, env.payload).await,
         "history.list" => crate::history::list(app, ctx, env.payload).await,
         "history.get" => crate::history::get(app, ctx, env.payload).await,
         "stats" => crate::history::stats(app, ctx, env.payload).await,
@@ -436,6 +470,12 @@ pub struct Options {
     pub extract_schema: Option<Value>,
     /// Extract embedded images (DOCX, PPTX, XLSX, ODF, EPUB, HTML) and reference them from the Markdown.
     pub extract_images: bool,
+    /// Also write a zip with the Markdown, `summary.md` (when there is a summary), any
+    /// translation and the extracted images.
+    pub create_zip: bool,
+    /// With a zip: write only the zip and the JSON result to the destination (no separate
+    /// `.md` or `images/`). Turns on `create_zip`.
+    pub zip_only: bool,
 }
 
 impl Default for Options {
@@ -465,6 +505,8 @@ impl Default for Options {
             llm_api_key: None,
             extract_schema: None,
             extract_images: false,
+            create_zip: false,
+            zip_only: false,
         }
     }
 }
@@ -485,8 +527,16 @@ impl Options {
         self.pdf_skip_local_processing.unwrap_or(self.ocr == Ocr::On)
     }
 
+    /// A zip is written (`create_zip`, or `zip_only` which implies it).
+    pub fn wants_zip(&self) -> bool {
+        self.create_zip || self.zip_only
+    }
+
     pub fn validate(&self) -> Result<(), AppError> {
         let bad = |m: &str| Err(AppError::bad_request("invalid_options", m.to_string()));
+        if self.wants_zip() && self.execution == Execution::Sync {
+            return bad("create_zip and zip_only need async execution (the zip is kept with the job)");
+        }
         if self.pdf_skip_local_processing == Some(true) && self.ocr != Ocr::On {
             return bad("pdf_skip_local_processing=true requires ocr=on");
         }

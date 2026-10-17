@@ -56,6 +56,10 @@ pub struct Header<'a> {
     pub docv_bytes: Option<u64>,
     /// Where extracted images were written (`null` without a destination or without images).
     pub images_dir: Option<&'a str>,
+    /// Where the zip is (or will be, via `job.zip`) for an async job; `zip_bytes` is 0 until it
+    /// exists.
+    pub zip_file: Option<&'a str>,
+    pub zip_bytes: u64,
     pub metadata: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
@@ -387,6 +391,78 @@ pub fn json_sibling(md: &str) -> String {
     format!("{}.docv.json", md.strip_suffix(".md").unwrap_or(md))
 }
 
+/// `report.md` -> `report.zip`: where the zip is written.
+pub fn zip_sibling(md: &str) -> String {
+    format!("{}.zip", md.strip_suffix(".md").unwrap_or(md))
+}
+
+/// What goes into a zip. `name` is the base name used for the files inside (`<name>.md`).
+pub struct ZipParts<'a> {
+    pub name: &'a str,
+    pub content: &'a str,
+    pub summary: Option<&'a str>,
+    /// `(language, translated Markdown)`, written as `<name>.<language>.md`.
+    pub translated: Option<(&'a str, &'a str)>,
+    /// Extracted images: (stored path, file name), written under `images/`.
+    pub images: &'a [(PathBuf, String)],
+}
+
+/// Write the zip atomically (temp + rename) and return its size. Entries are stored without
+/// compression: pictures barely shrink, and the zip stays quick to build. Images are copied
+/// from disk, so the zip is never held in memory. Blocking: call on the CPU lane.
+pub fn write_zip(path: &Path, parts: &ZipParts) -> io::Result<u64> {
+    use zip::write::SimpleFileOptions;
+    let tmp = path.with_extension(format!("zip-{}.tmp", uuid::Uuid::now_v7()));
+    let res = (|| {
+        let f = std::fs::File::create(&tmp)?;
+        let mut z = zip::ZipWriter::new(io::BufWriter::with_capacity(64 * 1024, f));
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
+        let text = |z: &mut zip::ZipWriter<_>, name: &str, s: &str| -> io::Result<()> {
+            z.start_file(name, opts).map_err(io::Error::other)?;
+            z.write_all(s.as_bytes())
+        };
+        text(&mut z, &format!("{}.md", parts.name), parts.content)?;
+        if let Some(s) = parts.summary.filter(|s| !s.trim().is_empty()) {
+            text(&mut z, "summary.md", &format!("{}\n", s.trim_end()))?;
+        }
+        if let Some((lang, t)) = parts.translated {
+            text(&mut z, &format!("{}.{lang}.md", parts.name), t)?;
+        }
+        for (src, name) in parts.images {
+            let mut f = std::fs::File::open(src)?;
+            z.start_file(format!("images/{name}"), opts).map_err(io::Error::other)?;
+            io::copy(&mut f, &mut z)?;
+        }
+        let w = z.finish().map_err(io::Error::other)?;
+        let f = w.into_inner().map_err(|e| e.into_error())?;
+        f.sync_data()?;
+        f.metadata().map(|m| m.len())
+    })();
+    match res {
+        Ok(n) => {
+            std::fs::rename(&tmp, path)?;
+            Ok(n)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Base name for the files inside a zip: the destination's Markdown name without `.md`, or the
+/// source file name.
+pub fn zip_name(dest: Option<&Dest>, source: &str) -> String {
+    let from_dest = dest.and_then(|d| {
+        let shown = d.display();
+        let base = shown.split('?').next().unwrap_or(&shown).rsplit('/').next()?.to_string();
+        let base = percent_encoding::percent_decode_str(&base).decode_utf8_lossy().to_string();
+        base.strip_suffix(".md").map(str::to_string)
+    });
+    let name = from_dest.unwrap_or_else(|| crate::source::file_name(source).trim().to_string());
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) { "document".into() } else { name }
+}
+
 impl Dest {
     pub fn display(&self) -> String {
         match self {
@@ -406,6 +482,17 @@ impl Dest {
                 let (base, q) = s.split_once('?').map(|(a, b)| (a, Some(b))).unwrap_or((s, None));
                 let d = images_of(base);
                 q.map(|q| format!("{d}?{q}")).unwrap_or(d)
+            }
+        }
+    }
+
+    pub fn zip_display(&self) -> String {
+        match self {
+            Dest::Local(p) => zip_sibling(&p.display().to_string()),
+            Dest::S3(_, s) => {
+                let (base, q) = s.split_once('?').map(|(a, b)| (a, Some(b))).unwrap_or((s, None));
+                let z = zip_sibling(base);
+                q.map(|q| format!("{z}?{q}")).unwrap_or(z)
             }
         }
     }
@@ -500,19 +587,30 @@ async fn s3_put(loc: &crate::source::S3Loc, key: &str, data: bytes::Bytes, overw
 /// before the caller marks completion; any failure is returned, never hidden.
 /// `images`: extracted image files (stored path, file name) copied into `images/` next to the
 /// Markdown. They are named by content hash, so an existing file is already the same image.
+/// `zip`: a built zip, written as `<name>.zip`; with `zip_only` the Markdown and images are not
+/// written separately.
 pub async fn publish(
     dest: &Dest,
     result_file: &Path,
     content: &str,
     overwrite: bool,
     images: &[(PathBuf, String)],
+    zip: Option<&Path>,
+    zip_only: bool,
 ) -> Result<(), AppError> {
+    let images: &[(PathBuf, String)] = if zip_only { &[] } else { images };
     match dest {
         Dest::Local(p) => {
             let (p, src, md, images) = (p.clone(), result_file.to_path_buf(), content.as_bytes().to_vec(), images.to_vec());
+            let zip = zip.map(Path::to_path_buf);
             tokio::task::spawn_blocking(move || {
                 local_put(Some(&src), None, Path::new(&json_sibling(&p.display().to_string())), overwrite)?;
-                local_put(None, Some(&md), &p, overwrite)?;
+                if let Some(z) = &zip {
+                    local_put(Some(z), None, Path::new(&zip_sibling(&p.display().to_string())), overwrite)?;
+                }
+                if !zip_only {
+                    local_put(None, Some(&md), &p, overwrite)?;
+                }
                 if !images.is_empty() {
                     let io = |e: io::Error| {
                         AppError::new(502, "destination_write_failed", format!("cannot write images: {}", e.kind())).stage("storage")
@@ -535,13 +633,37 @@ pub async fn publish(
         Dest::S3(loc, shown) => {
             let data = tokio::fs::read(result_file).await.map_err(|_| AppError::internal("cannot read result file"))?;
             s3_put(loc, &json_sibling(&loc.key), data.into(), overwrite, &dest.json_display()).await?;
-            s3_put(loc, &loc.key, bytes::Bytes::copy_from_slice(content.as_bytes()), overwrite, shown).await?;
+            if let Some(z) = zip {
+                publish_zip(dest, z, overwrite).await?;
+            }
+            if !zip_only {
+                s3_put(loc, &loc.key, bytes::Bytes::copy_from_slice(content.as_bytes()), overwrite, shown).await?;
+            }
             let prefix = loc.key.rsplit_once('/').map(|(d, _)| format!("{d}/images/")).unwrap_or_else(|| "images/".into());
             for (src, name) in images {
                 let data = tokio::fs::read(src).await.map_err(|_| AppError::internal("cannot read extracted image"))?;
                 s3_put(loc, &format!("{prefix}{name}"), data.into(), true, &dest.images_display()).await?;
             }
             Ok(())
+        }
+        #[cfg(not(feature = "s3"))]
+        Dest::S3(..) => Err(AppError::feature_not_compiled("s3")),
+    }
+}
+
+/// Write a built zip next to the destination's Markdown (`<name>.zip`).
+pub async fn publish_zip(dest: &Dest, zip: &Path, overwrite: bool) -> Result<(), AppError> {
+    match dest {
+        Dest::Local(p) => {
+            let (target, zip) = (PathBuf::from(zip_sibling(&p.display().to_string())), zip.to_path_buf());
+            tokio::task::spawn_blocking(move || local_put(Some(&zip), None, &target, overwrite))
+                .await
+                .map_err(|_| AppError::internal("publish task failed"))?
+        }
+        #[cfg(feature = "s3")]
+        Dest::S3(loc, _) => {
+            let data = tokio::fs::read(zip).await.map_err(|_| AppError::internal("cannot read zip"))?;
+            s3_put(loc, &zip_sibling(&loc.key), data.into(), overwrite, &dest.zip_display()).await
         }
         #[cfg(not(feature = "s3"))]
         Dest::S3(..) => Err(AppError::feature_not_compiled("s3")),
@@ -572,6 +694,8 @@ mod tests {
             docv_file: None,
             docv_bytes: None,
             images_dir: None,
+            zip_file: None,
+            zip_bytes: 0,
             metadata: None,
         };
         let t = Trailer { error: None, llm: &llm, timing: &timing };
