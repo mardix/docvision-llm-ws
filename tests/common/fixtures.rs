@@ -230,3 +230,130 @@ pub fn epub() -> Vec<u8> {
         ("OEBPS/ch2.xhtml", "<html><body><h1>Chapter 2</h1><p>Second.</p></body></html>".into()),
     ])
 }
+
+// ---------------------------------------------------------------- documents with pictures
+
+/// A picture large enough to be kept (the extractor skips icons under 32x32 or 256 bytes).
+pub fn picture(w: u32, h: u32, seed: u8) -> Vec<u8> {
+    let mut v = png(w, h);
+    v.resize(600, seed);
+    v
+}
+
+fn zip_bytes(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, body) in entries {
+        w.start_file(*name, opts).unwrap();
+        w.write_all(body).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+const DRAWING_NS: &str = r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture""#;
+
+/// DOCX with a chart picture, the same picture again, and a tiny icon.
+pub fn docx_with_pictures() -> Vec<u8> {
+    let drawing = |rid: &str, descr: &str| {
+        format!(
+            r#"<w:r><w:drawing><wp:inline><wp:docPr id="1" name="Picture" descr="{descr}"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="{rid}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+        )
+    };
+    let doc = format!(
+        r#"<?xml version="1.0"?><w:document {W} {DRAWING_NS}><w:body><w:p><w:r><w:t>Revenue grew.</w:t></w:r></w:p><w:p>{}</w:p><w:p><w:r><w:t>Again:</w:t></w:r>{}</w:p><w:p>{}</w:p></w:body></w:document>"#,
+        drawing("rIdImg1", "Revenue chart"),
+        drawing("rIdImg2", ""),
+        drawing("rIdIcon", "icon")
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg1" Type="image" Target="media/image1.png"/><Relationship Id="rIdImg2" Type="image" Target="media/image2.png"/><Relationship Id="rIdIcon" Type="image" Target="media/icon.png"/></Relationships>"#;
+    zip_bytes(&[
+        ("[Content_Types].xml", b"<Types/>".to_vec()),
+        ("word/document.xml", doc.into_bytes()),
+        ("word/_rels/document.xml.rels", rels.as_bytes().to_vec()),
+        ("word/media/image1.png", picture(640, 480, 1)),
+        // Identical bytes under another name: kept once.
+        ("word/media/image2.png", picture(640, 480, 1)),
+        ("word/media/icon.png", picture(16, 16, 2)),
+    ])
+}
+
+/// PPTX with one picture on slide 2.
+pub fn pptx_with_picture() -> Vec<u8> {
+    let ns = r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    let slide = |title: &str, pic: bool| {
+        let p = if pic {
+            r#"<p:pic><p:nvPicPr><p:cNvPr id="4" name="Picture 3" descr="Team photo"/></p:nvPicPr><p:blipFill><a:blip r:embed="rIdP"/></p:blipFill></p:pic>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<?xml version="1.0"?><p:sld {ns}><p:cSld><p:spTree><p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>{title}</a:t></a:r></a:p></p:txBody></p:sp>{p}</p:spTree></p:cSld></p:sld>"#
+        )
+    };
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdS1" Type="slide" Target="slides/slide1.xml"/><Relationship Id="rIdS2" Type="slide" Target="slides/slide2.xml"/></Relationships>"#;
+    let pres = format!(
+        r#"<?xml version="1.0"?><p:presentation {ns}><p:sldIdLst><p:sldId id="256" r:id="rIdS1"/><p:sldId id="257" r:id="rIdS2"/></p:sldIdLst></p:presentation>"#
+    );
+    let slide_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdP" Type="image" Target="../media/image7.jpeg"/></Relationships>"#;
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+    jpeg.resize(900, 7);
+    zip_bytes(&[
+        ("[Content_Types].xml", b"<Types/>".to_vec()),
+        ("ppt/presentation.xml", pres.into_bytes()),
+        ("ppt/_rels/presentation.xml.rels", rels.as_bytes().to_vec()),
+        ("ppt/slides/slide1.xml", slide("Intro", false).into_bytes()),
+        ("ppt/slides/slide2.xml", slide("Our team", true).into_bytes()),
+        ("ppt/slides/_rels/slide2.xml.rels", slide_rels.as_bytes().to_vec()),
+        ("ppt/media/image7.jpeg", jpeg),
+    ])
+}
+
+/// XLSX (from `xlsx(2)`) plus a picture under `xl/media/`.
+pub fn xlsx_with_picture() -> Vec<u8> {
+    let base = xlsx(2);
+    let mut zin = zip::ZipArchive::new(std::io::Cursor::new(base)).unwrap();
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..zin.len() {
+        let mut f = zin.by_index(i).unwrap();
+        let mut b = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut b).unwrap();
+        entries.push((f.name().to_string(), b));
+    }
+    entries.push(("xl/media/image1.png".into(), picture(300, 200, 9)));
+    let refs: Vec<(&str, Vec<u8>)> = entries.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
+    zip_bytes(&refs)
+}
+
+/// HTML with an embedded `data:` image and an external one (left alone).
+pub fn html_with_data_image() -> Vec<u8> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(picture(200, 100, 5));
+    format!(
+        r#"<html><body><h1>Logo page</h1><p>Before <img alt="Company logo" src="data:image/png;base64,{b64}"> after.</p><p><img alt="Remote" src="https://example.com/x.png"></p></body></html>"#
+    )
+    .into_bytes()
+}
+
+/// ODT with a picture inside a paragraph.
+pub fn odt_with_picture() -> Vec<u8> {
+    let content = r#"<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink"><office:body><office:text><text:h text:outline-level="1">Odt Pictures</text:h><text:p>See <draw:frame><draw:image xlink:href="Pictures/abc.png"/></draw:frame> here.</text:p></office:text></office:body></office:document-content>"#;
+    zip_bytes(&[
+        ("mimetype", b"application/vnd.oasis.opendocument.text".to_vec()),
+        ("content.xml", content.as_bytes().to_vec()),
+        ("Pictures/abc.png", picture(400, 300, 3)),
+    ])
+}
+
+/// EPUB with one chapter showing an image stored in the book.
+pub fn epub_with_picture() -> Vec<u8> {
+    let container = r#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#;
+    let opf = r#"<?xml version="1.0"?><package><metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Pic Book</dc:title></metadata><manifest><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="i1" href="images/cover.png" media-type="image/png"/></manifest><spine><itemref idref="c1"/></spine></package>"#;
+    let ch1 = r#"<html><body><h1>Chapter One</h1><p><img src="../images/cover.png" alt="Cover art"/></p></body></html>"#;
+    zip_bytes(&[
+        ("mimetype", b"application/epub+zip".to_vec()),
+        ("META-INF/container.xml", container.as_bytes().to_vec()),
+        ("OEBPS/content.opf", opf.as_bytes().to_vec()),
+        ("OEBPS/text/ch1.xhtml", ch1.as_bytes().to_vec()),
+        ("OEBPS/images/cover.png", picture(500, 700, 4)),
+    ])
+}

@@ -15,6 +15,26 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// An extracted image as listed in the result. `path` is relative to the Markdown file.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ImageMeta {
+    pub path: String,
+    pub format: String,
+    pub bytes: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Where it appears ("slide 3", "page 2", "workbook"), when known.
+    pub location: Option<String>,
+    pub alt: Option<String>,
+}
+
+impl ImageMeta {
+    /// File name inside the images folder (`<hash>.<ext>`).
+    pub fn file_name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Header<'a> {
     pub schema_version: u32,
@@ -34,6 +54,8 @@ pub struct Header<'a> {
     /// Where the JSON result was written and its exact size (`null` without a destination).
     pub docv_file: Option<&'a str>,
     pub docv_bytes: Option<u64>,
+    /// Where extracted images were written (`null` without a destination or without images).
+    pub images_dir: Option<&'a str>,
     pub metadata: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
@@ -53,6 +75,8 @@ pub struct Statistics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slide_count: Option<u32>,
     pub chunk_count: usize,
+    /// Images extracted (`extract_images`).
+    pub image_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +120,8 @@ pub struct Body {
     pub summary: Option<String>,
     /// Structured data matching `extract_schema` (`None` when not requested or failed).
     pub extracted: Option<serde_json::Value>,
+    /// Extracted images (`extract_images`), referenced from `content` as `images/<file>`.
+    pub images: Vec<ImageMeta>,
     pub chunks: Vec<ChunkRange>,
     pub language: Option<String>,
     pub language_detection: Option<LanguageDetection>,
@@ -119,6 +145,7 @@ impl Serialize for Body {
             title: &'a Option<String>,
             summary: &'a Option<String>,
             extracted: &'a Option<serde_json::Value>,
+            images: &'a [ImageMeta],
             chunks: ChunksSer<'a>,
             language: &'a Option<String>,
             language_detection: &'a Option<LanguageDetection>,
@@ -135,6 +162,7 @@ impl Serialize for Body {
             title: &self.title,
             summary: &self.summary,
             extracted: &self.extracted,
+            images: &self.images,
             chunks: ChunksSer { content: &self.content, chunks: &self.chunks },
             language: &self.language,
             language_detection: &self.language_detection,
@@ -366,6 +394,22 @@ impl Dest {
             Dest::S3(_, s) => s.clone(),
         }
     }
+    /// Where extracted images go: an `images/` folder next to the Markdown.
+    pub fn images_display(&self) -> String {
+        let images_of = |md: &str| match md.rsplit_once('/') {
+            Some((dir, _)) => format!("{dir}/images/"),
+            None => "images/".to_string(),
+        };
+        match self {
+            Dest::Local(p) => images_of(&p.display().to_string()),
+            Dest::S3(_, s) => {
+                let (base, q) = s.split_once('?').map(|(a, b)| (a, Some(b))).unwrap_or((s, None));
+                let d = images_of(base);
+                q.map(|q| format!("{d}?{q}")).unwrap_or(d)
+            }
+        }
+    }
+
     pub fn json_display(&self) -> String {
         match self {
             Dest::Local(p) => json_sibling(&p.display().to_string()),
@@ -454,13 +498,35 @@ async fn s3_put(loc: &crate::source::S3Loc, key: &str, data: bytes::Bytes, overw
 
 /// Publish the Markdown to the destination and the JSON result next to it. Both are written
 /// before the caller marks completion; any failure is returned, never hidden.
-pub async fn publish(dest: &Dest, result_file: &Path, content: &str, overwrite: bool) -> Result<(), AppError> {
+/// `images`: extracted image files (stored path, file name) copied into `images/` next to the
+/// Markdown. They are named by content hash, so an existing file is already the same image.
+pub async fn publish(
+    dest: &Dest,
+    result_file: &Path,
+    content: &str,
+    overwrite: bool,
+    images: &[(PathBuf, String)],
+) -> Result<(), AppError> {
     match dest {
         Dest::Local(p) => {
-            let (p, src, md) = (p.clone(), result_file.to_path_buf(), content.as_bytes().to_vec());
+            let (p, src, md, images) = (p.clone(), result_file.to_path_buf(), content.as_bytes().to_vec(), images.to_vec());
             tokio::task::spawn_blocking(move || {
                 local_put(Some(&src), None, Path::new(&json_sibling(&p.display().to_string())), overwrite)?;
-                local_put(None, Some(&md), &p, overwrite)
+                local_put(None, Some(&md), &p, overwrite)?;
+                if !images.is_empty() {
+                    let io = |e: io::Error| {
+                        AppError::new(502, "destination_write_failed", format!("cannot write images: {}", e.kind())).stage("storage")
+                    };
+                    let dir = p.parent().unwrap_or(Path::new("/")).join("images");
+                    std::fs::create_dir_all(&dir).map_err(io)?;
+                    for (src, name) in &images {
+                        let target = dir.join(name);
+                        if !target.exists() {
+                            local_put(Some(src), None, &target, true)?;
+                        }
+                    }
+                }
+                Ok(())
             })
             .await
             .map_err(|_| AppError::internal("publish task failed"))?
@@ -469,7 +535,13 @@ pub async fn publish(dest: &Dest, result_file: &Path, content: &str, overwrite: 
         Dest::S3(loc, shown) => {
             let data = tokio::fs::read(result_file).await.map_err(|_| AppError::internal("cannot read result file"))?;
             s3_put(loc, &json_sibling(&loc.key), data.into(), overwrite, &dest.json_display()).await?;
-            s3_put(loc, &loc.key, bytes::Bytes::copy_from_slice(content.as_bytes()), overwrite, shown).await
+            s3_put(loc, &loc.key, bytes::Bytes::copy_from_slice(content.as_bytes()), overwrite, shown).await?;
+            let prefix = loc.key.rsplit_once('/').map(|(d, _)| format!("{d}/images/")).unwrap_or_else(|| "images/".into());
+            for (src, name) in images {
+                let data = tokio::fs::read(src).await.map_err(|_| AppError::internal("cannot read extracted image"))?;
+                s3_put(loc, &format!("{prefix}{name}"), data.into(), true, &dest.images_display()).await?;
+            }
+            Ok(())
         }
         #[cfg(not(feature = "s3"))]
         Dest::S3(..) => Err(AppError::feature_not_compiled("s3")),
@@ -499,6 +571,7 @@ mod tests {
             md_bytes: None,
             docv_file: None,
             docv_bytes: None,
+            images_dir: None,
             metadata: None,
         };
         let t = Trailer { error: None, llm: &llm, timing: &timing };

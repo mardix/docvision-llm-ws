@@ -57,6 +57,10 @@ impl App {
     pub fn results_dir(&self) -> PathBuf {
         self.cfg.data_dir.join("results")
     }
+    /// Extracted images, stored once per content hash (`<hash>.<ext>`).
+    pub fn images_dir(&self) -> PathBuf {
+        self.cfg.data_dir.join("images")
+    }
 }
 
 pub struct Running {
@@ -69,7 +73,7 @@ pub struct Running {
 pub async fn start(cfg: Config) -> Result<Running, String> {
     let t0 = Instant::now();
     let step = |name: &str| tracing::debug!(target: "docvision_llm_ws::startup", step = name, elapsed_us = t0.elapsed().as_micros() as u64, "startup");
-    for d in [cfg.data_dir.clone(), cfg.data_dir.join("staging"), cfg.data_dir.join("results")] {
+    for d in [cfg.data_dir.clone(), cfg.data_dir.join("staging"), cfg.data_dir.join("results"), cfg.data_dir.join("images")] {
         std::fs::create_dir_all(&d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
     }
     let db = db::Db::connect(cfg.database_url.expose()).await.map_err(|e| format!("database: {e}"))?;
@@ -121,6 +125,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/_/dashboard", get(rpc::dashboard))
         .route("/_/doc", get(doc::doc))
         .route("/_/db", get(rpc::db_download))
+        .route("/_/images/{name}", get(rpc::image_file))
         .layer(CompressionLayer::new().compress_when(SizeAbove::new(4096).and(NotForContentType::IMAGES)))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(body_cap))
         .with_state(app)

@@ -58,6 +58,7 @@ pub fn extract(path: &Path, limits: &Limits) -> XResult<Extracted> {
 
     let mut ex = Extracted { title_hint: Some(title.trim().to_string()).filter(|t| !t.is_empty()), ..Default::default() };
     let mut out = String::new();
+    let mut images = super::images::Images::new(limits.extract_images);
     for idref in spine {
         let Some((href, media)) = manifest.get(&idref) else { continue };
         if !media.contains("html") {
@@ -65,12 +66,20 @@ pub fn extract(path: &Path, limits: &Limits) -> XResult<Extracted> {
         }
         let part = resolve(&opf_dir, &percent_encoding::percent_decode_str(href).decode_utf8_lossy());
         if let Some(html) = pkg.read_string(&part)? {
-            let c = super::html::convert(&html);
+            let mut c = if images.enabled {
+                // Image paths in a chapter are relative to that chapter's directory.
+                let dir = part.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                super::html::convert_with(&html, super::html::ImgMode::Package(dir))
+            } else {
+                super::html::convert(&html)
+            };
+            super::images::resolve(&mut c, Some(&mut pkg), &mut images)?;
             out.push_str(c.content.trim());
             out.push_str("\n\n");
             ex.warnings.extend(c.warnings);
         }
     }
     ex.content = out;
+    images.finish(&mut ex);
     Ok(ex)
 }

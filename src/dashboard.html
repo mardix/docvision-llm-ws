@@ -277,6 +277,7 @@
               <label><input type="checkbox" id="f_gsummary" checked> Summary</label>
               <label data-for="convert"><input type="checkbox" id="f_gchunks" checked> Chunks</label>
               <label data-for="convert"><input type="checkbox" id="f_partial"> Allow partial</label>
+              <label data-for="convert"><input type="checkbox" id="f_images"> Extract images</label>
             </div>
           </div>
           <details class="adv" data-for="convert summarize extract">
@@ -656,6 +657,7 @@
           el("dt", {}, "Created"), el("dd", {}, q.created_at ? new Date(q.created_at).toLocaleString() : "—"),
           el("dt", {}, "Duration"), el("dd", {}, ms(q.timings && q.timings.total_ms)),
           el("dt", {}, "Pages · words"), el("dd", {}, num(st.original_total_pages) + " · " + num(st.total_words)),
+          el("dt", {}, "Images"), el("dd", {}, st.image_count ? num(st.image_count) + " extracted" : "—"),
           el("dt", {}, "Tokens"), el("dd", {}, u.calls ? num(u.input_tokens) + " in · " + num(u.output_tokens) + " out · " + num(u.calls) + " calls" : "—"),
           el("dt", {}, "Request ID"), el("dd", { class: "mono" }, q.request_id),
           el("dt", {}, "Job ID"), el("dd", { class: "mono" }, q.job_id || "—"),
@@ -705,6 +707,7 @@
       options.cache = $("f_cache").value;
       options.gen_chunks = $("f_gchunks").checked;
       options.allow_partial = $("f_partial").checked;
+      if ($("f_images").checked) options.extract_images = true;
       const dest = val("f_dest");
       if (dest) { payload.destination = dest; options.execution = "async"; }
     } else {
@@ -755,6 +758,7 @@
       if (data.statistics.original_total_pages != null) fact("Pages", num(data.statistics.original_total_pages));
     }
     if (data.chunks) fact("Chunks", num(data.chunks.length));
+    if (data.images && data.images.length) fact("Images", num(data.images.length));
     const t = data.llm && data.llm.totals;
     if (t && t.calls) { fact("Model", (t.provider || "") + " / " + (t.model || "")); fact("Tokens", num((t.input_tokens || 0) + (t.output_tokens || 0))); }
     if (data.timing) fact("Time", ms(data.timing.total_ms));

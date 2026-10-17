@@ -5,6 +5,7 @@
 pub mod epub;
 pub mod html;
 pub mod image;
+pub mod images;
 #[cfg(feature = "odf-epub")]
 pub mod odf;
 pub mod ooxml;
@@ -39,6 +40,10 @@ pub struct Extracted {
     pub slide_count: Option<u32>,
     pub warnings: Vec<String>,
     pub partial: bool,
+    /// Extracted embedded images (`extract_images`), referenced from `content`.
+    pub images: Vec<images::Image>,
+    /// Image bytes found inline (e.g. HTML `data:` URIs), referenced by `#N` placeholders.
+    pub inline_images: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +52,8 @@ pub struct Limits {
     pub max_archive_bytes: u64,
     pub max_pdf_pages: u32,
     pub max_decoded_pixels: u64,
+    /// Extract embedded images (`extract_images` option).
+    pub extract_images: bool,
 }
 
 #[derive(Debug)]
@@ -90,7 +97,7 @@ pub fn capacity_hint(path: &Path, mult: usize) -> usize {
 pub fn extract_native(path: &Path, format: Format, limits: &Limits) -> XResult<Extracted> {
     match format {
         Format::Markdown | Format::Text => text::extract(path, format),
-        Format::Html => html::extract_file(path),
+        Format::Html => html::extract_file(path, limits.extract_images),
         Format::Docx => ooxml::docx(path, limits),
         Format::Xlsx => ooxml::xlsx(path, limits),
         Format::Pptx => ooxml::pptx(path, limits),
@@ -133,6 +140,20 @@ impl Package {
         drop(reader);
         self.budget = self.budget.saturating_sub(limited.used);
         out.map(Some)
+    }
+
+    /// An entry's raw bytes (counted against the archive budget); `None` if it does not exist.
+    pub fn read_bytes(&mut self, name: &str) -> XResult<Option<Vec<u8>>> {
+        self.with_entry(name, |r| {
+            let mut b = Vec::new();
+            r.read_to_end(&mut b).map_err(io_err)?;
+            Ok(b)
+        })
+    }
+
+    /// Names of entries under `prefix`, in archive order.
+    pub fn names_under(&self, prefix: &str) -> Vec<String> {
+        self.zip.file_names().filter(|n| n.starts_with(prefix) && !n.ends_with('/')).map(str::to_string).collect()
     }
 
     pub fn read_string(&mut self, name: &str) -> XResult<Option<String>> {

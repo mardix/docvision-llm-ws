@@ -128,6 +128,7 @@ pub fn docx(path: &Path, limits: &Limits) -> XResult<Extracted> {
     let mut ex = Extracted { title_hint: read_dc_title(&mut pkg, "docProps/core.xml"), ..Default::default() };
     let mut out = String::with_capacity(capacity_hint(path, 2));
     let mut images = 0usize;
+    let extract_images = limits.extract_images;
     let found = pkg.with_entry("word/document.xml", |r| {
         let mut x = xml_reader(r);
         let mut buf = Vec::new();
@@ -140,6 +141,7 @@ pub fn docx(path: &Path, limits: &Limits) -> XResult<Extracted> {
         let mut in_text = false;
         let mut link: Option<(Option<String>, String)> = None; // (url, text)
         let mut ordinals: HashMap<(String, u32), u32> = HashMap::new();
+        let mut image_alt: Option<String> = None;
         loop {
             let ev = x.read_event_into(&mut buf)?;
             match ev {
@@ -185,6 +187,15 @@ pub fn docx(path: &Path, limits: &Limits) -> XResult<Extracted> {
                             link = Some((url, String::new()));
                         }
                         b"drawing" | b"pict" => images += 1,
+                        // Alt text of the drawing that follows.
+                        b"docPr" if extract_images => image_alt = attr(e, b"descr").or_else(|| attr(e, b"title")),
+                        // `a:blip r:embed` (DrawingML) or `v:imagedata r:id` (VML) point at the picture.
+                        b"blip" | b"imagedata" if extract_images => {
+                            let id = attr_q(e, b"r:embed").or_else(|| attr_q(e, b"r:id"));
+                            if let Some((target, false)) = id.and_then(|id| rels.get(&id)) {
+                                run_text.push_str(&super::images::marker(&resolve("word", target), image_alt.take().as_deref()));
+                            }
+                        }
                         b"tbl" if !empty => tables.push(Table { rows: Vec::new(), cell: None }),
                         b"tr" if !empty => {
                             if let Some(t) = tables.last_mut() {
@@ -311,13 +322,16 @@ pub fn docx(path: &Path, limits: &Limits) -> XResult<Extracted> {
     if found.is_none() {
         return Err(super::ExtractError::Corrupt("DOCX is missing word/document.xml".into()));
     }
-    if images > 0 {
+    if images > 0 && !extract_images {
         ex.warnings.push(format!("{images} embedded image(s) or drawing(s) were not transcribed"));
     }
     if pkg.has("word/vbaProject.bin") {
         ex.warnings.push("document contains macros; they were ignored".into());
     }
     ex.content = out;
+    let mut collected = super::images::Images::new(extract_images);
+    super::images::resolve(&mut ex, Some(&mut pkg), &mut collected)?;
+    collected.finish(&mut ex);
     Ok(ex)
 }
 
@@ -526,7 +540,24 @@ pub fn xlsx(path: &Path, limits: &Limits) -> XResult<Extracted> {
         ex.warnings.push("workbook contains macros; they were ignored".into());
     }
     ex.sheet_count = Some(sheets.len() as u32);
+    // Pictures are anchored to sheets through drawing parts; list them after the sheets.
+    if limits.extract_images {
+        let media = pkg.names_under("xl/media/");
+        if !media.is_empty() {
+            out.push_str("## Images\n\n");
+            for m in media {
+                out.push_str(&super::images::marker(&m, None));
+                out.push_str("\n\n");
+            }
+        }
+    }
     ex.content = out;
+    let mut collected = super::images::Images::new(limits.extract_images);
+    super::images::resolve(&mut ex, Some(&mut pkg), &mut collected)?;
+    collected.finish(&mut ex);
+    for img in &mut ex.images {
+        img.location = Some("workbook".into());
+    }
     Ok(ex)
 }
 
@@ -558,11 +589,16 @@ pub fn pptx(path: &Path, limits: &Limits) -> XResult<Extracted> {
     let mut ex = Extracted { title_hint: read_dc_title(&mut pkg, "docProps/core.xml"), ..Default::default() };
     let mut out = String::with_capacity(capacity_hint(path, 1));
     let mut pictures = 0usize;
+    let extract_images = limits.extract_images;
     for (i, part) in slides.iter().enumerate() {
         let n = i as u32 + 1;
         ex.segments.push(Segment { start: out.len(), kind: SpanKind::Slide, from: n, to: n });
         let mut title = String::new();
         let mut body = String::new();
+        // Pictures are referenced through the slide's own relationships.
+        let (slide_dir, slide_file) = part.rsplit_once('/').unwrap_or(("", part));
+        let slide_rels =
+            if extract_images { read_rels(&mut pkg, &format!("{slide_dir}/_rels/{slide_file}.rels"))? } else { HashMap::new() };
         pkg.with_entry(part, |r| {
             let mut x = xml_reader(r);
             let mut buf = Vec::new();
@@ -572,10 +608,19 @@ pub fn pptx(path: &Path, limits: &Limits) -> XResult<Extracted> {
             let mut in_t = false;
             let mut table: Option<Vec<Vec<String>>> = None;
             let mut cell: Option<String> = None;
+            let mut in_pic = false;
+            let mut pic_alt: Option<String> = None;
             loop {
                 match x.read_event_into(&mut buf)? {
                     Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                         b"sp" => is_title = false,
+                        b"cNvPr" if in_pic => pic_alt = attr(&e, b"descr").or_else(|| attr(&e, b"title")),
+                        b"blip" if in_pic && extract_images => {
+                            if let Some((target, false)) = attr_q(&e, b"r:embed").and_then(|id| slide_rels.get(&id)) {
+                                body.push_str(&super::images::marker(&resolve(slide_dir, target), pic_alt.take().as_deref()));
+                                body.push('\n');
+                            }
+                        }
                         b"ph" => is_title = matches!(attr(&e, b"type").as_deref(), Some("title" | "ctrTitle")),
                         b"p" => {
                             para.clear();
@@ -584,7 +629,10 @@ pub fn pptx(path: &Path, limits: &Limits) -> XResult<Extracted> {
                         b"pPr" => lvl = attr(&e, b"lvl").and_then(|v| v.parse().ok()).unwrap_or(0),
                         b"t" => in_t = true,
                         b"br" => para.push('\n'),
-                        b"pic" => pictures += 1,
+                        b"pic" => {
+                            pictures += 1;
+                            in_pic = true;
+                        }
                         b"tbl" => table = Some(Vec::new()),
                         b"tr" => {
                             if let Some(t) = table.as_mut() {
@@ -597,6 +645,7 @@ pub fn pptx(path: &Path, limits: &Limits) -> XResult<Extracted> {
                     ev @ (Event::Text(_) | Event::GeneralRef(_)) if in_t => para.push_str(&super::xml_text(&ev)),
                     Event::End(e) => match e.local_name().as_ref() {
                         b"t" => in_t = false,
+                        b"pic" => in_pic = false,
                         b"p" => {
                             let text = para.trim();
                             if text.is_empty() {
@@ -648,7 +697,7 @@ pub fn pptx(path: &Path, limits: &Limits) -> XResult<Extracted> {
             out.push_str("\n\n");
         }
     }
-    if pictures > 0 {
+    if pictures > 0 && !extract_images {
         ex.warnings.push(format!("{pictures} picture(s) were not transcribed"));
     }
     if pkg.has("ppt/vbaProject.bin") {
@@ -657,6 +706,9 @@ pub fn pptx(path: &Path, limits: &Limits) -> XResult<Extracted> {
     ex.slide_count = Some(slides.len() as u32);
     ex.pages = Some(super::PageCount { total: slides.len() as u32, method: "slide_count", exact: true });
     ex.content = out;
+    let mut collected = super::images::Images::new(extract_images);
+    super::images::resolve(&mut ex, Some(&mut pkg), &mut collected)?;
+    collected.finish(&mut ex);
     Ok(ex)
 }
 

@@ -74,6 +74,7 @@ Requests can override any of these with the `llm_*` options.
 | `POST /rpc` | token | All operations (below) |
 | `GET /_/dashboard` | token, entered in the page | Dashboard: live activity, in-progress requests, paginated request history and failures (filter by requester, operation, format, status) with file paths and sizes, and forms to run `convert`, `summarize`, `chunk` and `extract` |
 | `GET /_/doc` | none | This README as a web page |
+| `GET /_/images/{file}` | token | An extracted image, by the file name listed in a result's `images` |
 | `GET /_/db` | token | Download a snapshot of the SQLite database (the dashboard has a button for it). `404` when the database is PostgreSQL |
 | `GET /metrics` | token | Prometheus metrics |
 | `GET /livez` | none | `200 ok` while the process is up |
@@ -260,6 +261,8 @@ All options are optional, and all are top-level keys in `options`.
 
 **Chunking:** chunks follow the document's structure. A heading starts a new chunk, and paragraphs, tables and code are split at line boundaries. A heading is never returned on its own: it stays with the text under it, even when a sub-heading comes first. Chunks under a quarter of `chunk_size` are merged into a neighbour. Each chunk's `headings` holds its heading path.
 
+**Images:** `extract_images: true` extracts the pictures embedded in DOCX, PPTX, XLSX, ODT/ODS/ODP, EPUB and HTML (`data:` images). See [Extracted images](#extracted-images).
+
 **Local title:** the document's own title (Office/ODF/EPUB metadata, HTML `<title>`, Markdown `# `), else the first heading, else the file name. If an LLM title fails, the local title is used and `feature_status.title.method` is `local_fallback`.
 
 **LLM**
@@ -406,6 +409,51 @@ See [Structured extraction](#structured-extraction) for how it works.
 - `feature_status` reports each optional feature (`title`, `summary`, `chunks`, `language`, `translation`, `extraction`) as `completed`, `failed`, `skipped` or `disabled`, with the method used and any error.
 - `llm.calls` has one record per attempt (provider, model, status, tokens, duration), including retries and failures.
 - Token counts the provider did not report are `null`, never `0`. The service does not calculate prices; use the token counts.
+
+<br>
+
+### Extracted images
+
+With `"extract_images": true`, pictures embedded in the document are saved as files and referenced from the Markdown where they appear:
+
+```markdown
+Revenue grew 12% this quarter.
+
+![Revenue chart](images/3f2a9c1b7d4e5a60.png)
+```
+
+| Format | Images taken from | Placement |
+| --- | --- | --- |
+| DOCX | Pictures in the body (`word/media/`) | Where they appear, with the picture's alt text |
+| PPTX | Pictures on each slide | In the slide's section, with alt text |
+| XLSX | `xl/media/` | Listed under an `## Images` section after the sheets |
+| ODT, ODS, ODP | `Pictures/` | Where they appear |
+| EPUB | Images inside the book | Where they appear, with alt text |
+| HTML | Embedded `data:` images | Where they appear. Linked images (`https://…`) are never fetched; their alt text is kept |
+
+- **One file per picture.** Files are named by a hash of their content, so a picture used twice (or in two documents) is stored once.
+- **Skipped:** icons smaller than 32×32 pixels or 256 bytes, objects that aren't images, and anything past 500 images or 64 MiB per document (with a warning).
+- **Formats are kept as stored:** PNG, JPEG, GIF, WebP, BMP, TIFF, SVG, EMF or WMF. Nothing is re-encoded.
+- **Where the files go:**
+  - With a destination, they are written to an `images/` folder next to the Markdown, so the references work as-is. The result's `images_dir` says where.
+  - Without one, download them with `GET /_/images/{file}` (token required). They are kept as long as results (`DOCVISION_RESULT_RETENTION`).
+- **In the result**, `images` lists each one:
+
+  ```json
+  "images": [
+    {
+      "path": "images/3f2a9c1b7d4e5a60.png",
+      "format": "png",
+      "bytes": 48213,
+      "width": 640,
+      "height": 480,
+      "location": "slide 2",
+      "alt": "Revenue chart"
+    }
+  ]
+  ```
+
+- **Not covered yet:** PDFs, charts stored as chart data rather than pictures, and images linked from other servers.
 
 <br>
 

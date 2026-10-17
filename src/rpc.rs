@@ -187,6 +187,47 @@ pub async fn metrics(State(app): State<Arc<App>>, headers: HeaderMap) -> Respons
     r
 }
 
+/// `GET /_/images/{file}`: an extracted image (token required). Files are named by content
+/// hash; they are served with a sandboxing CSP so an SVG can never run script on this origin.
+pub async fn image_file(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let (id, ext) = name.split_once('.').unwrap_or(("", ""));
+    let mime = match ext {
+        "png" => "image/png",
+        "jpg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tif" => "image/tiff",
+        "svg" => "image/svg+xml",
+        "emf" => "image/emf",
+        "wmf" => "image/wmf",
+        _ => "",
+    };
+    if id.len() != 16 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) || mime.is_empty() {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let Ok(bytes) = tokio::fs::read(app.images_dir().join(&name)).await else {
+        return (StatusCode::NOT_FOUND, "not found (images are kept as long as results)").into_response();
+    };
+    let mut r = Response::new(Body::from(bytes));
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400, immutable"));
+    if ext == "svg" {
+        h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    }
+    r
+}
+
 /// `GET /_/db`: download a snapshot of the SQLite database (token required).
 pub async fn db_download(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if !authorized(&app, &headers) {
@@ -392,6 +433,8 @@ pub struct Options {
     // structured extraction
     /// JSON Schema (object at the top); the result's `extracted` field follows it.
     pub extract_schema: Option<Value>,
+    /// Extract embedded images (DOCX, PPTX, XLSX, ODF, EPUB, HTML) and reference them from the Markdown.
+    pub extract_images: bool,
 }
 
 impl Default for Options {
@@ -420,6 +463,7 @@ impl Default for Options {
             llm_base_url: None,
             llm_api_key: None,
             extract_schema: None,
+            extract_images: false,
         }
     }
 }

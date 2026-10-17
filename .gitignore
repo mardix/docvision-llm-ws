@@ -4,3 +4,4 @@
 .history
 *.sqlite
 *.sqlite-*
+.DS_Store

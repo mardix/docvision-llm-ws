@@ -7,10 +7,43 @@ use tl::{Node, NodeHandle, Parser};
 
 const MAX_DEPTH: usize = 128;
 
-pub fn extract_file(path: &Path) -> XResult<Extracted> {
+pub fn extract_file(path: &Path, extract_images: bool) -> XResult<Extracted> {
     let bytes = std::fs::read(path).map_err(|e| ExtractError::Corrupt(e.to_string()))?;
     let html = String::from_utf8_lossy(&bytes);
-    Ok(convert(&html))
+    if !extract_images {
+        return Ok(convert(&html));
+    }
+    let mut ex = convert_with(&html, ImgMode::Inline);
+    let mut images = super::images::Images::new(true);
+    super::images::resolve(&mut ex, None, &mut images)?;
+    images.finish(&mut ex);
+    Ok(ex)
+}
+
+/// What to do with `<img>` tags.
+#[derive(Clone, Copy)]
+pub enum ImgMode<'a> {
+    /// Keep the alt text only (images not extracted).
+    Off,
+    /// Extract images embedded as `data:` URIs.
+    Inline,
+    /// Also extract images stored in the surrounding package, relative to this directory (EPUB).
+    Package(&'a str),
+}
+
+/// Decode a `data:image/…` URI.
+fn data_uri(src: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let (head, data) = src.strip_prefix("data:")?.split_once(',')?;
+    if !head.starts_with("image/") {
+        return None;
+    }
+    if head.ends_with(";base64") {
+        let clean: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+        base64::engine::general_purpose::STANDARD.decode(clean).ok()
+    } else {
+        Some(percent_encoding::percent_decode_str(data).collect())
+    }
 }
 
 /// Remove `<script>`, `<style>`, `<noscript>`, `<template>` blocks and comments, case-insensitively.
@@ -113,6 +146,8 @@ struct Ctx<'p, 'a> {
     pre: usize,
     title: Option<String>,
     images: usize,
+    img_mode: ImgMode<'a>,
+    inline: Vec<Vec<u8>>,
     table: Option<(Vec<Vec<String>>, Option<String>)>,
 }
 
@@ -297,11 +332,25 @@ impl Ctx<'_, '_> {
             }
             "img" => {
                 self.images += 1;
-                if let Some(alt) = tag.attributes().get("alt").flatten() {
-                    let alt = decode_entities(alt.as_utf8_str().trim());
-                    if !alt.is_empty() {
-                        self.line.push_str(&format!("[image: {alt}]"));
+                let alt = tag.attributes().get("alt").flatten().map(|a| decode_entities(a.as_utf8_str().trim())).filter(|a| !a.is_empty());
+                let src = tag.attributes().get("src").flatten().map(|s| decode_entities(s.as_utf8_str().trim()));
+                let placed = match (self.img_mode, src) {
+                    (ImgMode::Off, _) | (_, None) => None,
+                    (_, Some(s)) if s.starts_with("data:") => data_uri(&s).map(|b| {
+                        self.inline.push(b);
+                        super::images::marker(&format!("#{}", self.inline.len() - 1), alt.as_deref())
+                    }),
+                    (ImgMode::Package(base), Some(s)) if !s.contains("://") && !s.starts_with("//") => {
+                        let path = s.split(['?', '#']).next().unwrap_or_default();
+                        let path = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+                        Some(super::images::marker(&super::resolve(base, &path), alt.as_deref()))
                     }
+                    _ => None,
+                };
+                match (placed, alt) {
+                    (Some(m), _) => self.line.push_str(&m),
+                    (None, Some(alt)) => self.line.push_str(&format!("[image: {alt}]")),
+                    (None, None) => {}
                 }
             }
             "ul" | "ol" => {
@@ -399,6 +448,10 @@ impl Ctx<'_, '_> {
 }
 
 pub fn convert(html: &str) -> Extracted {
+    convert_with(html, ImgMode::Off)
+}
+
+pub fn convert_with(html: &str, img_mode: ImgMode<'_>) -> Extracted {
     let cleaned = strip_blocks(html);
     let mut ex = Extracted::default();
     let dom = match tl::parse(&cleaned, tl::ParserOptions::default()) {
@@ -418,15 +471,18 @@ pub fn convert(html: &str) -> Extracted {
         pre: 0,
         title: None,
         images: 0,
+        img_mode,
+        inline: Vec::new(),
         table: None,
     };
     for h in dom.children() {
         ctx.node(h, 0);
     }
     ctx.flush();
-    if ctx.images > 0 {
+    if ctx.images > 0 && matches!(ctx.img_mode, ImgMode::Off) {
         ex.warnings.push(format!("{} image(s) were not transcribed", ctx.images));
     }
+    ex.inline_images = std::mem::take(&mut ctx.inline);
     ex.title_hint = ctx.title;
     ex.content = ctx.out;
     ex

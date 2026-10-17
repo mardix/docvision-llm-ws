@@ -141,6 +141,23 @@ pub struct Converted {
     pub src_bytes: Option<u64>,
 }
 
+/// The extracted images listed in a converted body.
+fn image_metas(body: &BodyRef) -> Vec<result::ImageMeta> {
+    match body {
+        BodyRef::Owned(b) => b.images.clone(),
+        raw => raw.fields(&["images"]).remove("images").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default(),
+    }
+}
+
+/// A cached result that lists images is only usable while those image files still exist; the
+/// ones it uses are re-touched so retention keeps them.
+fn cached_images_present(app: &App, raw: &Arc<Vec<u8>>) -> bool {
+    image_metas(&BodyRef::Raw(raw.clone())).iter().all(|m| {
+        let p = app.images_dir().join(m.file_name());
+        std::fs::OpenOptions::new().write(true).open(&p).and_then(|f| f.set_modified(std::time::SystemTime::now())).is_ok()
+    })
+}
+
 /// Size of the converted Markdown (`None` when there is no converted body).
 fn md_bytes(body: Option<&BodyRef>) -> Option<u64> {
     match body? {
@@ -249,8 +266,40 @@ pub fn stored_job(app: &App, row: &JobRow) -> Option<StoredJob> {
     Some(s)
 }
 
-fn limits(app: &App) -> extract::Limits {
+/// Write extracted images to the content-addressed store (once per hash). Files already there
+/// are re-touched so retention keeps them while results refer to them.
+fn store_images(dir: &std::path::Path, images: Vec<extract::images::Image>) -> std::io::Result<Vec<result::ImageMeta>> {
+    let mut out = Vec::with_capacity(images.len());
+    for img in images {
+        let name = img.file_name();
+        touch_or_write(&dir.join(&name), &img.bytes)?;
+        out.push(result::ImageMeta {
+            path: format!("images/{name}"),
+            format: img.ext.to_string(),
+            bytes: img.bytes.len() as u64,
+            width: img.width,
+            height: img.height,
+            location: img.location,
+            alt: img.alt,
+        });
+    }
+    Ok(out)
+}
+
+fn touch_or_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(f) => f.set_modified(std::time::SystemTime::now()),
+        Err(_) => {
+            let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::now_v7()));
+            std::fs::write(&tmp, bytes)?;
+            std::fs::rename(&tmp, path)
+        }
+    }
+}
+
+fn limits(app: &App, opts: &Options) -> extract::Limits {
     extract::Limits {
+        extract_images: opts.extract_images,
         max_archive_ratio: app.cfg.max_archive_ratio,
         max_archive_bytes: app.cfg.max_archive_bytes,
         max_pdf_pages: app.cfg.max_pdf_pages,
@@ -419,7 +468,7 @@ async fn async_cache_hit(
     let ep = endpoint(app, &spec.options, false)?;
     let (p, m) = ep.as_ref().map(|e| (e.provider.as_str(), e.model.as_str())).unwrap_or(("none", "none"));
     let key = cache::key(&staged.hash, &spec.options, p, m);
-    let Some(raw) = cache_lookup(app, &key).await else { return Ok(None) };
+    let Some(raw) = cache_lookup(app, &key).await.filter(|raw| cached_images_present(app, raw)) else { return Ok(None) };
     app.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let spec = Arc::new(JobSpec { job_id: Some(job_id.to_string()), ..clone_spec(spec) });
     let mut row = request_row(&spec, "async", "accepted", Some(job_id.to_string()));
@@ -537,6 +586,7 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
         md_bytes: md_bytes(body.as_ref()),
         docv_file: None,
         docv_bytes: None,
+        images_dir: None,
         metadata: spec.payload.metadata.as_ref(),
     };
     let empty = Body::default();
@@ -713,7 +763,7 @@ async fn pipeline(
     let key = cache::key(&staged.hash, opts, &p, &m);
     let src_bytes = Some(staged.size);
     if opts.cache == CacheMode::Use {
-        if let Some(raw) = cache_lookup(app, &key).await {
+        if let Some(raw) = cache_lookup(app, &key).await.filter(|raw| cached_images_present(app, raw)) {
             app.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(Converted { body: BodyRef::Raw(raw), cache_hit: true, leader: false, cache_key: Some(key), fetch_ms, src_bytes });
         }
@@ -766,7 +816,7 @@ async fn convert_body(
         Format::Pdf => extract::pdf::run(&app, &staged, opts, ep.as_ref(), &acct, &sem, prio).await?,
         f if f.is_image() => extract::image::run(&app, &staged, f, opts, ep.as_ref(), &acct, &sem, prio).await?,
         _ => {
-            let (path, lim) = (staged.path.clone(), limits(&app));
+            let (path, lim) = (staged.path.clone(), limits(&app, opts));
             app.cpu.run(move || extract::extract_native(&path, format, &lim)).await.map_err(cpu_err)??
         }
     };
@@ -781,7 +831,15 @@ async fn convert_body(
         .stage("extraction"));
     }
     let (target, overlap) = (opts.effective_chunk_size(), opts.effective_chunk_overlap());
-    let Extracted { content, title_hint, segments, pages, sheet_count, slide_count, warnings, partial } = ex;
+    let Extracted { content, title_hint, segments, pages, sheet_count, slide_count, warnings, partial, images, .. } = ex;
+    let images = if images.is_empty() {
+        Vec::new()
+    } else {
+        let dir = app.images_dir();
+        app.cpu.run(move || store_images(&dir, images)).await.map_err(cpu_err)?.map_err(|e| {
+            AppError::new(500, "storage_failed", format!("could not store extracted images: {}", e.kind())).stage("extraction")
+        })?
+    };
     let (content, chunks, stats) = app
         .cpu
         .run(move || {
@@ -809,7 +867,9 @@ async fn convert_body(
             sheet_count,
             slide_count,
             chunk_count: if opts.gen_chunks { chunks.len() } else { 0 },
+            image_count: images.len(),
         },
+        images,
         chunks: if opts.gen_chunks { chunks } else { Vec::new() },
         content,
         warnings,
@@ -901,6 +961,15 @@ async fn finalize_async(
         Err(e) => ("failed", None, Some(e), 0, false, false, None, None),
     };
     let md_size = md_bytes(body.as_ref());
+    // Extracted images this result refers to (copied next to the Markdown when published).
+    let image_files: Vec<(std::path::PathBuf, String)> = body
+        .as_ref()
+        .map(image_metas)
+        .unwrap_or_default()
+        .iter()
+        .map(|m| (app.images_dir().join(m.file_name()), m.file_name().to_string()))
+        .collect();
+    let images_shown = dest.as_ref().filter(|_| !image_files.is_empty()).map(|d| d.images_display());
     let llm = if cache_hit { LlmSection::default() } else { acct.section() };
     let empty = Arc::new(Body::default());
     let body_ref = body.clone().unwrap_or(BodyRef::Owned(empty));
@@ -925,6 +994,7 @@ async fn finalize_async(
             timing.stages.storage_ms = t_store.elapsed().as_millis() as u64;
         }
         let dest_s = spec.payload.destination.as_deref().map(source::sanitize);
+        let images_s = images_shown.clone();
         let eb = err.map(|e| e.body());
         let cpu = app2.cpu.clone();
         async move {
@@ -943,6 +1013,7 @@ async fn finalize_async(
                         md_bytes: md_size,
                         docv_file: published.as_ref().map(|p| p.1.as_str()),
                         docv_bytes: published.as_ref().map(|p| p.2),
+                        images_dir: published.as_ref().and(images_s.as_deref()),
                         metadata: spec2.payload.metadata.as_ref(),
                     };
                     let t = Trailer { error: eb.as_ref(), llm: &llm2, timing: &timing };
@@ -978,7 +1049,7 @@ async fn finalize_async(
     };
     if let (Ok(_), Some(d)) = (&written, &dest)
         && err.is_none()
-        && let Err(e) = result::publish(d, &path, md.as_deref().unwrap_or(""), spec.options.overwrite).await
+        && let Err(e) = result::publish(d, &path, md.as_deref().unwrap_or(""), spec.options.overwrite, &image_files).await
     {
         // Never claim a destination was written when storage failed.
         status = "failed";

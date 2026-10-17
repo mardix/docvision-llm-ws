@@ -18,6 +18,7 @@ pub fn extract(path: &Path, format: Format, limits: &Limits) -> XResult<Extracte
     let mut sheets = 0u32;
     let mut slides = 0u32;
     let mut images = 0usize;
+    let extract_images = limits.extract_images;
     let found = pkg.with_entry("content.xml", |r| {
         let mut x = xml_reader(r);
         let mut buf = Vec::new();
@@ -52,7 +53,20 @@ pub fn extract(path: &Path, format: Format, limits: &Limits) -> XResult<Extracte
                     }
                     b"a" if !empty => link = Some((attr(e, b"href"), String::new())),
                     b"list" if !empty => list_depth += 1,
-                    b"image" => images += 1,
+                    b"image" => {
+                        images += 1;
+                        // `draw:image xlink:href="Pictures/x.png"`; external links are left alone.
+                        if let Some(href) = attr(e, b"href").filter(|h| extract_images && !h.contains("://")) {
+                            let m = super::images::marker(href.trim_start_matches("./"), None);
+                            match para.as_mut() {
+                                Some((_, t)) => t.push_str(&m),
+                                None => {
+                                    out.push_str(&m);
+                                    out.push_str("\n\n");
+                                }
+                            }
+                        }
+                    }
                     b"page" if !empty && format == Format::Odp => {
                         slides += 1;
                         ex.segments.push(Segment { start: out.len(), kind: SpanKind::Slide, from: slides, to: slides });
@@ -193,7 +207,7 @@ pub fn extract(path: &Path, format: Format, limits: &Limits) -> XResult<Extracte
     if found.is_none() {
         return Err(super::ExtractError::Corrupt("ODF package is missing content.xml".into()));
     }
-    if images > 0 {
+    if images > 0 && !extract_images {
         ex.warnings.push(format!("{images} image(s) were not transcribed"));
     }
     match format {
@@ -205,5 +219,8 @@ pub fn extract(path: &Path, format: Format, limits: &Limits) -> XResult<Extracte
         _ => {}
     }
     ex.content = out;
+    let mut collected = super::images::Images::new(extract_images);
+    super::images::resolve(&mut ex, Some(&mut pkg), &mut collected)?;
+    collected.finish(&mut ex);
     Ok(ex)
 }

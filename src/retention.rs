@@ -49,10 +49,16 @@ pub async fn run(app: Arc<App>, mut shutdown: watch::Receiver<bool>) {
             .await;
         // Expired job rows are gone now; drop cached copies.
         app.jobs.clear_terminal_cache();
-        let (results, staging) = (app.results_dir(), app.staging_dir());
+        let (results, staging, images) = (app.results_dir(), app.staging_dir(), app.images_dir());
         let keep = app.cfg.result_retention;
         let stale_staging = (app.cfg.job_timeout * 2).max(Duration::from_secs(3600));
-        let removed = app.cpu.run(move || sweep_dir(&results, keep) + sweep_dir(&staging, stale_staging)).await.unwrap_or(0);
+        // Extracted images are re-touched whenever a conversion uses them, so this only removes
+        // images no recent result refers to.
+        let removed = app
+            .cpu
+            .run(move || sweep_dir(&results, keep) + sweep_dir(&staging, stale_staging) + sweep_dir(&images, keep))
+            .await
+            .unwrap_or(0);
         if removed > 0 {
             tracing::info!(target: "docvision_llm_ws::retention", removed, "retention removed expired files");
         }
